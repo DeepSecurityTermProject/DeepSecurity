@@ -1,6 +1,6 @@
 # DeepSecurity / SecTrace
 
-基于大语言模型的攻击行为检测、捕获与溯源系统。项目围绕“检测 Detection -> 捕获 Capture -> 溯源 Attribution/Traceback”的安全分析链路，整合主机日志、主机行为、网络流量、MITRE ATT&CK 知识库、RAG 检索和 OpenAI 兼容 LLM 接口，用于课程实验、攻防场景演示和安全分析原型验证。
+666基于大语言模型的攻击行为检测、捕获与溯源系统。项目围绕“检测 Detection -> 捕获 Capture -> 溯源 Attribution/Traceback”的安全分析链路，整合主机日志、主机行为、网络流量、MITRE ATT&CK 知识库、RAG 检索和 OpenAI 兼容 LLM 接口，用于课程实验、攻防场景演示和安全分析原型验证。
 
 ## 主要功能
 
