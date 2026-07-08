@@ -100,6 +100,7 @@ class EvidenceCollectorAgent(BaseAgent):
             "technique_name": alert.get("technique_name"),
             "tactic": alert.get("tactic"),
             "severity": alert.get("severity"),
+            "sources": [],
             "timestamps": [],
             "ips_involved": set(),
             "processes_involved": set(),
@@ -116,9 +117,22 @@ class EvidenceCollectorAgent(BaseAgent):
                 "event_type": evt.get("event_type"),
                 "host_ip": evt.get("host_ip"),
                 "timestamp": evt.get("timestamp"),
+                "source_table": evt.get("source_table"),
+                "source_record_id": evt.get("source_record_id"),
+                "event_hash": evt.get("event_hash"),
                 "entities": {k: v for k, v in evt.get("entities", {}).items()
                              if k in ("process_name", "pid", "file_path", "dst_ip", "command_line", "user", "domain")},
             })
+            if evt.get("source_table") and evt.get("source_record_id"):
+                evidence["sources"].append({
+                    "source_table": evt.get("source_table"),
+                    "source_record_id": evt.get("source_record_id"),
+                    "event_hash": evt.get("event_hash") or hashlib.sha256(
+                        json.dumps(evt, sort_keys=True, ensure_ascii=False, default=str).encode("utf-8")
+                    ).hexdigest(),
+                    "collected_at": evt.get("timestamp") or "",
+                    "evidence_type": evt.get("data_source") or evt.get("event_type") or "",
+                })
             host_ip = evt.get("host_ip")
             if host_ip:
                 evidence["ips_involved"].add(str(host_ip))
@@ -139,6 +153,7 @@ class EvidenceCollectorAgent(BaseAgent):
         evidence["ips_involved"] = list(evidence["ips_involved"])
         evidence["processes_involved"] = list(evidence["processes_involved"])
         evidence["files_accessed"] = list(evidence["files_accessed"])
+        evidence["sources"] = evidence["sources"][:200]
         return evidence
 
 

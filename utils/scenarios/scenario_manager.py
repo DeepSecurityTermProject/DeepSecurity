@@ -3,6 +3,7 @@
 """
 import json
 import threading
+import hashlib
 from datetime import datetime
 from typing import Any
 
@@ -42,14 +43,23 @@ class ScenarioManager:
                 "network_flow": "NetworkTraffic",
             }
             table = table_map.get(ds, "HostBehaviors")
+            event_hash = hashlib.sha256(
+                json.dumps(event, sort_keys=True, ensure_ascii=False, default=str).encode("utf-8")
+            ).hexdigest()
             row = {
                 "id": len(self._bridge._memory_store[table]) + 1,
                 "result": event,
                 "content": json.dumps(event, ensure_ascii=False),
                 "create_time": event.get("timestamp", datetime.now().isoformat()),
+                "event_time_utc": event.get("timestamp", ""),
+                "event_hash": event_hash,
                 "host_ip": event.get("host_ip", ""),
+                "host_name": event.get("host_name", event.get("host_ip", "")),
             }
             self._bridge.insert(table, row)
+            event.setdefault("source_table", table)
+            event.setdefault("source_record_id", row["id"])
+            event.setdefault("event_hash", event_hash)
 
     def get_scenarios(self) -> list[dict]:
         return [

@@ -23,6 +23,8 @@ class DataBridge:
             "NetworkTraffic": [],
             "AttackReports": [],
             "Alerts": [],
+            "EvidenceCases": [],
+            "EvidenceRecords": [],
         }
         self._checkpoints: dict[str, int] = {}
 
@@ -80,6 +82,7 @@ class DataBridge:
             "NetworkTraffic": self.count("NetworkTraffic"),
             "AttackReports": self.count("AttackReports"),
             "Alerts": self.count("Alerts"),
+            "EvidenceCases": self.count("EvidenceCases"),
             "freshness": {
                 "HostLogs": datetime.now().isoformat(),
                 "HostBehaviors": datetime.now().isoformat(),

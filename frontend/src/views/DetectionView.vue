@@ -97,9 +97,20 @@
     <!-- Report Modal -->
     <n-modal v-model:show="showReport" title="📋 综合分析报告" style="max-width: 960px" preset="card">
       <n-spin :show="analyzing">
+        <n-space v-if="evidenceCaseId" align="center" style="margin-bottom: 12px; flex-wrap: wrap">
+          <n-tag size="small">case_id: <code>{{ evidenceCaseId }}</code></n-tag>
+          <n-tag size="small">chain_id: <code>{{ evidenceChainId || '-' }}</code></n-tag>
+          <n-tag size="small">final_hash: <code>{{ evidenceFinalHash || '-' }}</code></n-tag>
+          <n-tag v-if="evidenceVerified !== null" :type="evidenceVerified ? 'success' : 'error'" size="small">
+            {{ evidenceVerified ? 'hash 校验通过' : 'hash 校验失败' }}
+          </n-tag>
+        </n-space>
         <pre class="report-pre">{{ reportText }}</pre>
       </n-spin>
       <template #footer>
+        <n-button v-if="evidenceCaseId" size="small" :loading="verifyingEvidence" @click="runEvidenceVerify">🔐 校验证据</n-button>
+        <n-button v-if="evidenceCaseId" size="small" @click="downloadEvidence('json')">⬇ 导出JSON</n-button>
+        <n-button v-if="evidenceCaseId" size="small" @click="downloadEvidence('markdown')">⬇ 导出Markdown</n-button>
         <n-button type="primary" size="small" @click="copyReport">📋 复制报告</n-button>
         <n-button size="small" @click="showReport = false">关闭</n-button>
       </template>
@@ -110,7 +121,7 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { useMessage } from 'naive-ui'
-import { getDetectionStats, getAlerts, runFullAnalysis, ragSearch } from '@/api/detection'
+import { getDetectionStats, getAlerts, runFullAnalysis, ragSearch, verifyEvidenceCase, exportEvidenceCase } from '@/api/detection'
 import { toBeijingTime } from '@/utils/time'
 
 const message = useMessage()
@@ -121,6 +132,11 @@ const showReport = ref(false)
 const alertTimeStart = ref('')
 const alertTimeEnd = ref('')
 const reportText = ref('')
+const evidenceCaseId = ref('')
+const evidenceChainId = ref('')
+const evidenceFinalHash = ref('')
+const evidenceVerified = ref<boolean | null>(null)
+const verifyingEvidence = ref(false)
 const ragQuery = ref('')
 const ragResults = ref<any[]>([])
 const ragSearching = ref(false)
@@ -171,6 +187,11 @@ async function runAnalysis() {
     const res = await runFullAnalysis()
     if (res.data?.ok) {
       reportText.value = res.data.data?.report || '(空报告)'
+      const ec = res.data.data?.evidence_case
+      evidenceCaseId.value = ec?.case_id || ''
+      evidenceChainId.value = ec?.chain_id || ''
+      evidenceFinalHash.value = ec?.final_hash || ''
+      evidenceVerified.value = null
       showReport.value = true
       pollAll()
       message.success('全管线分析完成！')
@@ -193,6 +214,47 @@ async function doRagSearch() {
 
 function copyReport() {
   navigator.clipboard?.writeText(reportText.value).then(() => message.success('报告已复制'))
+}
+
+async function runEvidenceVerify() {
+  if (!evidenceCaseId.value) return
+  verifyingEvidence.value = true
+  try {
+    const res = await verifyEvidenceCase(evidenceCaseId.value)
+    if (res.data?.ok) {
+      const all = !!res.data.data?.all_matched
+      evidenceVerified.value = all
+      message[all ? 'success' : 'error'](all ? '证据 hash 校验通过' : '证据 hash 校验失败')
+    } else {
+      message.error(res.data?.error || '校验失败')
+    }
+  } catch (e: any) {
+    message.error('校验失败: ' + (e?.response?.data?.error || e?.message || ''))
+  } finally {
+    verifyingEvidence.value = false
+  }
+}
+
+async function downloadEvidence(format: 'json' | 'markdown') {
+  if (!evidenceCaseId.value) return
+  try {
+    const res = await exportEvidenceCase(evidenceCaseId.value, format)
+    const blob = res.data instanceof Blob
+      ? res.data
+      : new Blob([res.data], {
+        type: format === 'markdown' ? 'text/markdown;charset=utf-8' : 'application/json;charset=utf-8',
+      })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = `evidence_${evidenceCaseId.value}.${format === 'markdown' ? 'md' : 'json'}`
+    document.body.appendChild(a)
+    a.click()
+    a.remove()
+    URL.revokeObjectURL(url)
+  } catch (e: any) {
+    message.error('导出失败: ' + (e?.response?.data?.error || e?.message || ''))
+  }
 }
 
 onMounted(() => {

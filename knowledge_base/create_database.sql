@@ -112,6 +112,38 @@ CREATE TABLE dbo.TopologySnapshots (
     CONSTRAINT UQ_TopologySnapshots_snapshot_id UNIQUE (snapshot_id)
 );
 
+-- 8) EvidenceCases — 证据包（一次分析对应一组证据链）
+IF NOT EXISTS (SELECT * FROM sys.tables WHERE name = 'EvidenceCases')
+CREATE TABLE dbo.EvidenceCases (
+    case_id             VARCHAR(64)   NOT NULL PRIMARY KEY,
+    verdict_id          VARCHAR(64)   NULL,
+    chain_id            VARCHAR(64)   NULL,
+    final_hash          VARCHAR(64)   NULL,
+    report_json         NVARCHAR(MAX) NULL,
+    iocs_json           NVARCHAR(MAX) NULL,
+    techniques_json     NVARCHAR(MAX) NULL,
+    created_at          DATETIME2     NULL DEFAULT SYSUTCDATETIME()
+);
+
+-- 9) EvidenceRecords — 证据索引（可定位到原始日志/行为/流量）
+IF NOT EXISTS (SELECT * FROM sys.tables WHERE name = 'EvidenceRecords')
+CREATE TABLE dbo.EvidenceRecords (
+    id                  INT IDENTITY PRIMARY KEY,
+    case_id             VARCHAR(64)   NOT NULL,
+    evidence_id         VARCHAR(64)   NOT NULL,
+    block_id            VARCHAR(64)   NULL,
+    block_hash          VARCHAR(64)   NULL,
+    previous_hash       VARCHAR(64)   NULL,
+    source_table        NVARCHAR(64)  NOT NULL,
+    source_record_id    INT           NOT NULL,
+    event_hash          VARCHAR(64)   NOT NULL,
+    collected_at        DATETIME2     NULL,
+    analyzed_at         DATETIME2     NULL,
+    evidence_type       NVARCHAR(64)  NULL,
+    summary             NVARCHAR(512) NULL,
+    CONSTRAINT FK_EvidenceRecords_Case FOREIGN KEY (case_id) REFERENCES dbo.EvidenceCases(case_id)
+);
+
 -- ============================================================
 -- 索引
 -- ============================================================
@@ -137,4 +169,11 @@ IF NOT EXISTS (SELECT * FROM sys.indexes WHERE name = 'IX_AnalysisReports_create
 IF NOT EXISTS (SELECT * FROM sys.indexes WHERE name = 'IX_DetectionDetails_report_id')
     CREATE NONCLUSTERED INDEX IX_DetectionDetails_report_id ON dbo.DetectionDetails(report_id);
 
-PRINT 'SecTrace database initialized successfully. 7 tables + indexes created.';
+IF NOT EXISTS (SELECT * FROM sys.indexes WHERE name = 'IX_EvidenceCases_created_at')
+    CREATE NONCLUSTERED INDEX IX_EvidenceCases_created_at ON dbo.EvidenceCases(created_at DESC);
+IF NOT EXISTS (SELECT * FROM sys.indexes WHERE name = 'IX_EvidenceRecords_case_id')
+    CREATE NONCLUSTERED INDEX IX_EvidenceRecords_case_id ON dbo.EvidenceRecords(case_id, id);
+IF NOT EXISTS (SELECT * FROM sys.indexes WHERE name = 'IX_EvidenceRecords_event_hash')
+    CREATE NONCLUSTERED INDEX IX_EvidenceRecords_event_hash ON dbo.EvidenceRecords(event_hash);
+
+PRINT 'SecTrace database initialized successfully. 9 tables + indexes created.';

@@ -34,6 +34,68 @@ def _parse_table(sql: str) -> str:
     return m.group(1) if m else "unknown"
 
 
+def _parse_where_equal(sql: str, params: list) -> tuple[dict, int]:
+    m = re.search(r'\bWHERE\b(.*?)(?:\bORDER\b|\bGROUP\b|\bOFFSET\b|\bFETCH\b|$)', sql, re.IGNORECASE | re.DOTALL)
+    if not m:
+        return {}, 0
+    where_sql = m.group(1).strip()
+    if not where_sql:
+        return {}, 0
+    parts = re.split(r'\bAND\b', where_sql, flags=re.IGNORECASE)
+    where: dict[str, object] = {}
+    used = 0
+    for part in parts:
+        p = part.strip().strip("()")
+        mm = re.match(r'(?:(?:dbo\.)?(\w+))\s*=\s*\?', p, flags=re.IGNORECASE)
+        if not mm:
+            continue
+        col = mm.group(1)
+        if used < len(params):
+            where[col] = params[used]
+            used += 1
+    return where, used
+
+
+def _parse_order(sql: str) -> tuple[str, bool]:
+    m = re.search(r'\bORDER\s+BY\s+(?:dbo\.)?(\w+)(?:\s+(ASC|DESC))?', sql, re.IGNORECASE)
+    if not m:
+        return "id", True
+    col = m.group(1)
+    direction = (m.group(2) or "DESC").upper()
+    return col, direction != "ASC"
+
+
+def _parse_limit_offset(sql: str, params: list, start_index: int) -> tuple[int, int]:
+    top = re.search(r'\bTOP\s*\(?\s*\?\s*\)?', sql, re.IGNORECASE)
+    if top and start_index < len(params):
+        return int(params[start_index] or 0), 0
+
+    offset_val = 0
+    limit_val = 2000
+    mo = re.search(r'\bOFFSET\s+(\?|\d+)\s+ROWS', sql, re.IGNORECASE)
+    if mo:
+        if mo.group(1) == "?":
+            if start_index < len(params):
+                offset_val = int(params[start_index] or 0)
+                start_index += 1
+        else:
+            offset_val = int(mo.group(1))
+
+        mf = re.search(r'\bFETCH\s+NEXT\s+(\?|\d+)\s+ROWS\s+ONLY', sql, re.IGNORECASE)
+        if mf:
+            if mf.group(1) == "?":
+                if start_index < len(params):
+                    limit_val = int(params[start_index] or 0)
+            else:
+                limit_val = int(mf.group(1))
+    else:
+        m = re.search(r'TOP\s*[\(\s]*(\d+)', sql, re.IGNORECASE)
+        if m:
+            limit_val = int(m.group(1))
+    return limit_val, offset_val
+
+
+
 def _parse_insert_values(sql: str, params: list) -> dict:
     """Parse INSERT INTO ... VALUES and return {column: value} dict"""
     bridge = get_bridge()
@@ -42,7 +104,7 @@ def _parse_insert_values(sql: str, params: list) -> dict:
     # Extract columns
     cols_match = re.search(r'\((.*?)\)\s*VALUES', sql, re.IGNORECASE)
     if not cols_match:
-        return {"_raw_sql": sql, "_params": str(params)}
+        return {"_table": table, "_raw_sql": sql, "_params": str(params)}
 
     cols = [c.strip() for c in cols_match.group(1).split(',')]
     values = params or []
@@ -99,9 +161,12 @@ def fetch_one(sql: str, params=None, conn_str: str | None = None) -> dict | None
     except Exception as e:
         logger.warning("SQL Server fetch_one failed, using DataBridge: %s", e)
         bridge = get_bridge()
+        p = params or []
         table = _parse_table(sql)
-        limit = 1
-        rows = bridge.query(table, limit=limit)
+        where, used = _parse_where_equal(sql, p)
+        order_by, desc = _parse_order(sql)
+        limit, offset = _parse_limit_offset(sql, p, used)
+        rows = bridge.query(table, where=where or None, order_by=order_by, desc=desc, limit=max(1, min(limit, 1)), offset=offset)
         return rows[0] if rows else None
 
 
@@ -119,14 +184,14 @@ def fetch_all(sql: str, params=None, conn_str: str | None = None) -> list[dict]:
     except Exception as e:
         logger.warning("SQL Server fetch_all failed, using DataBridge: %s", e)
         bridge = get_bridge()
+        p = params or []
         table = _parse_table(sql)
-        m = re.search(r'TOP\s*[\(\s]*(\d+)', sql, re.IGNORECASE)
-        if m:
-            limit = int(m.group(1))
-        else:
-            m = re.search(r'FETCH NEXT\s+(\d+)', sql, re.IGNORECASE)
-            limit = int(m.group(1)) if m else 2000
-        return bridge.query(table, limit=limit)
+        where, used = _parse_where_equal(sql, p)
+        order_by, desc = _parse_order(sql)
+        limit, offset = _parse_limit_offset(sql, p, used)
+        if limit <= 0:
+            limit = 2000
+        return bridge.query(table, where=where or None, order_by=order_by, desc=desc, limit=limit, offset=offset)
 
 
 if __name__ == "__main__":

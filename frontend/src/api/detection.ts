@@ -31,3 +31,22 @@ export function ragSearch(q: string) {
 export function getKnowledgeBase() {
   return client.get('/detection/api/knowledge')
 }
+
+export function listEvidenceCases(limit = 50) {
+  return client.get('/detection/api/evidence/cases', { params: { limit } })
+}
+
+export function getEvidenceCase(caseId: string) {
+  return client.get(`/detection/api/evidence/case/${caseId}`)
+}
+
+export function verifyEvidenceCase(caseId: string) {
+  return client.get(`/detection/api/evidence/case/${caseId}/verify`)
+}
+
+export function exportEvidenceCase(caseId: string, format: 'json' | 'markdown' = 'json') {
+  return client.get(`/detection/api/evidence/case/${caseId}/export`, {
+    params: { format },
+    responseType: 'blob',
+  })
+}

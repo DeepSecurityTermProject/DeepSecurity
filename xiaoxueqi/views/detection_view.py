@@ -1,5 +1,5 @@
 """检测仪表盘视图"""
-from flask import Blueprint, jsonify, render_template, request
+from flask import Blueprint, jsonify, make_response, render_template, request
 
 from utils.scenarios.scenario_manager import get_scenario_manager
 from utils.detection.llm_detector import LLMDetector
@@ -8,6 +8,14 @@ from utils.capture.agent_framework import get_capture_framework
 from utils.attribution.attribution_engine import AttributionEngine
 from utils.attribution.attacker_profiler import AttackerProfiler
 from utils.attribution.report_generator import ReportGenerator
+from utils.evidence import (
+    create_evidence_case,
+    export_evidence_case,
+    get_evidence_case,
+    list_evidence_cases,
+    list_evidence_records,
+    verify_evidence_case,
+)
 
 bp = Blueprint("detection", __name__)
 
@@ -17,6 +25,86 @@ attribution_engine = AttributionEngine()
 attacker_profiler = AttackerProfiler()
 report_generator = ReportGenerator()
 rag_kb = get_rag_kb()
+
+
+def _collect_fallback_iocs(events: list[dict], alerts: list[dict], evidence: list[dict], existing_iocs: dict | None) -> dict:
+    iocs = {
+        "ips": list((existing_iocs or {}).get("ips", [])),
+        "domains": list((existing_iocs or {}).get("domains", [])),
+        "processes": list((existing_iocs or {}).get("processes", [])),
+        "file_hashes": list((existing_iocs or {}).get("file_hashes", [])),
+        "techniques": list((existing_iocs or {}).get("techniques", [])),
+    }
+    seen_ips = set(iocs["ips"])
+    seen_domains = set(iocs["domains"])
+    seen_processes = set(iocs["processes"])
+    seen_techs = set(iocs["techniques"])
+
+    for alert in alerts:
+        tid = alert.get("technique_id")
+        if tid and tid not in seen_techs:
+            seen_techs.add(tid)
+            iocs["techniques"].append(tid)
+
+    for ev in evidence:
+        for ip in ev.get("ips_involved", []) or []:
+            if ip and ip not in seen_ips:
+                seen_ips.add(ip)
+                iocs["ips"].append(ip)
+        for proc in ev.get("processes_involved", []) or []:
+            if proc and proc not in seen_processes:
+                seen_processes.add(proc)
+                iocs["processes"].append(proc)
+        tid = ev.get("technique_id")
+        if tid and tid not in seen_techs:
+            seen_techs.add(tid)
+            iocs["techniques"].append(tid)
+
+    for evt in events:
+        host_ip = evt.get("host_ip")
+        if host_ip and host_ip not in seen_ips:
+            seen_ips.add(host_ip)
+            iocs["ips"].append(host_ip)
+
+        entities = evt.get("entities", {}) if isinstance(evt.get("entities"), dict) else {}
+        for key in ("src_ip", "dst_ip"):
+            ip = entities.get(key) or evt.get(key)
+            if ip and ip not in seen_ips:
+                seen_ips.add(ip)
+                iocs["ips"].append(ip)
+
+        domain = entities.get("domain")
+        if domain and domain not in seen_domains:
+            seen_domains.add(domain)
+            iocs["domains"].append(domain)
+
+        proc = entities.get("process_name")
+        if proc and proc not in seen_processes:
+            seen_processes.add(proc)
+            iocs["processes"].append(proc)
+
+    return iocs
+
+
+def _fallback_ttps_from_alerts(alerts: list[dict]) -> list[dict]:
+    ttps = []
+    seen: set[tuple[str, str]] = set()
+    for alert in alerts:
+        tid = str(alert.get("technique_id") or "").strip()
+        tactic = str(alert.get("tactic") or "").strip()
+        if not tid:
+            continue
+        key = (tid, tactic)
+        if key in seen:
+            continue
+        seen.add(key)
+        ttps.append({
+            "technique_id": tid,
+            "technique_name": alert.get("technique_name", ""),
+            "tactic": tactic,
+            "processes": [],
+        })
+    return ttps
 
 
 @bp.route("/", methods=["GET"])
@@ -84,6 +172,12 @@ def api_analyze():
     # 2. 捕获阶段
     capture_fw = get_capture_framework()
     capture_result = capture_fw.run(events, alerts)
+    capture_result["verdict"]["iocs"] = _collect_fallback_iocs(
+        events,
+        alerts,
+        capture_result["evidence"],
+        capture_result["verdict"].get("iocs", {}),
+    )
 
     # 3. 溯源阶段
     attribution_result = attribution_engine.attribute(
@@ -93,11 +187,12 @@ def api_analyze():
     )
 
     # 4. 攻击者画像
+    ttps = attribution_result.get("ttps_extracted", []) or _fallback_ttps_from_alerts(alerts)
     profile = attacker_profiler.build_profile(
         attribution_data=attribution_result,
         behavioral=attribution_result.get("attribution", {}).get("result", {}).get("behavioral_profile", {}),
         iocs=capture_result["verdict"].get("iocs", {}),
-        ttps=attribution_result.get("ttps_extracted", [])
+        ttps=ttps
     )
 
     # 5. 生成报告
@@ -106,7 +201,9 @@ def api_analyze():
         attribution=attribution_result,
         profile=profile,
         chains=capture_result["chains"],
-        detection_stats=mgr.get_detection_stats()
+        detection_stats=mgr.get_detection_stats(),
+        evidence=capture_result["evidence"],
+        alerts=alerts,
     )
 
     # 6. 导出可视化数据
@@ -114,6 +211,13 @@ def api_analyze():
         chains=capture_result["chains"],
         attribution=attribution_result,
         profile=profile
+    )
+
+    evidence_case = create_evidence_case(
+        verdict=capture_result["verdict"],
+        chains=capture_result["chains"],
+        evidence=capture_result["evidence"],
+        report=report,
     )
 
     return jsonify({
@@ -131,7 +235,8 @@ def api_analyze():
             "attribution": attribution_result,
             "profile": profile,
             "report": report,
-            "visualization": vis_data
+            "visualization": vis_data,
+            "evidence_case": evidence_case
         }
     })
 
@@ -164,3 +269,44 @@ def api_knowledge():
             "categories": list(set(d.get("category", "") for d in rag_kb.documents))
         }
     })
+
+
+@bp.route("/api/evidence/cases", methods=["GET"])
+def api_evidence_cases():
+    limit = request.args.get("limit", 50, type=int)
+    return jsonify({"ok": True, "data": list_evidence_cases(limit=limit)})
+
+
+@bp.route("/api/evidence/case/<case_id>", methods=["GET"])
+def api_evidence_case(case_id: str):
+    case = get_evidence_case(case_id)
+    if not case:
+        return jsonify({"ok": False, "error": "case not found"}), 404
+    records = list_evidence_records(case_id)
+    return jsonify({"ok": True, "case": case, "records": records})
+
+
+@bp.route("/api/evidence/case/<case_id>/verify", methods=["GET"])
+def api_evidence_verify(case_id: str):
+    case = get_evidence_case(case_id)
+    if not case:
+        return jsonify({"ok": False, "error": "case not found"}), 404
+    return jsonify({"ok": True, "data": verify_evidence_case(case_id)})
+
+
+@bp.route("/api/evidence/case/<case_id>/export", methods=["GET"])
+def api_evidence_export(case_id: str):
+    case = get_evidence_case(case_id)
+    if not case:
+        return jsonify({"ok": False, "error": "case not found"}), 404
+    fmt = (request.args.get("format") or "json").lower()
+    if fmt not in {"json", "markdown"}:
+        fmt = "json"
+    content_type, body = export_evidence_case(case_id, fmt=fmt)
+    if not body:
+        return jsonify({"ok": False, "error": "export failed"}), 500
+    resp = make_response(body)
+    resp.headers["Content-Type"] = content_type
+    filename = f"evidence_{case_id}.{ 'md' if fmt == 'markdown' else 'json' }"
+    resp.headers["Content-Disposition"] = f'attachment; filename="{filename}"'
+    return resp

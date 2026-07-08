@@ -16,7 +16,9 @@ class ReportGenerator:
                                        attribution: dict,
                                        profile: dict,
                                        chains: list[dict],
-                                       detection_stats: dict) -> str:
+                                       detection_stats: dict,
+                                       evidence: list[dict] | None = None,
+                                       alerts: list[dict] | None = None) -> str:
         """生成综合分析报告"""
 
         lines = []
@@ -65,29 +67,45 @@ class ReportGenerator:
         lines.append(f"- **总体置信度**: {verdict.get('confidence_level', 0):.0%}")
 
         lines.append(f"\n### 3.2 攻击链详情")
-        for i, chain in enumerate(chains):
-            v = chain.get("verification", {})
-            lines.append(f"\n#### 攻击链 #{i + 1} (ID: {chain.get('chain_id', 'N/A')})")
-            lines.append(f"- **验证状态**: {v.get('verdict', 'N/A')}")
-            lines.append(f"- **置信度**: {v.get('confidence', 0):.0%}")
-            lines.append(f"- **起始**: {chain.get('start_time', 'N/A')}")
-            lines.append(f"- **结束**: {chain.get('end_time', 'N/A')}")
+        if chains:
+            for i, chain in enumerate(chains):
+                v = chain.get("verification", {})
+                lines.append(f"\n#### 攻击链 #{i + 1} (ID: {chain.get('chain_id', 'N/A')})")
+                lines.append(f"- **验证状态**: {v.get('verdict', 'N/A')}")
+                lines.append(f"- **置信度**: {v.get('confidence', 0):.0%}")
+                lines.append(f"- **起始**: {chain.get('start_time', 'N/A')}")
+                lines.append(f"- **结束**: {chain.get('end_time', 'N/A')}")
 
-            lines.append(f"\n**攻击阶段:**")
-            for stage in chain.get("stages", []):
-                lines.append(f"  {stage.get('stage_order', '?')}. "
-                             f"[{stage.get('tactic', 'N/A')}] "
-                             f"{stage.get('technique_id', 'N/A')} - "
-                             f"{stage.get('technique_name', 'N/A')}")
+                lines.append(f"\n**攻击阶段:**")
+                for stage in chain.get("stages", []):
+                    lines.append(f"  {stage.get('stage_order', '?')}. "
+                                 f"[{stage.get('tactic', 'N/A')}] "
+                                 f"{stage.get('technique_id', 'N/A')} - "
+                                 f"{stage.get('technique_name', 'N/A')}")
 
-            if v.get("confirmations"):
-                lines.append(f"\n**验证确认:**")
-                for c in v["confirmations"]:
-                    lines.append(f"  - ✓ {c}")
-            if v.get("issues"):
-                lines.append(f"\n**潜在问题:**")
-                for issue in v["issues"]:
-                    lines.append(f"  - ⚠ {issue}")
+                if v.get("confirmations"):
+                    lines.append(f"\n**验证确认:**")
+                    for c in v["confirmations"]:
+                        lines.append(f"  - ✓ {c}")
+                if v.get("issues"):
+                    lines.append(f"\n**潜在问题:**")
+                    for issue in v["issues"]:
+                        lines.append(f"  - ⚠ {issue}")
+        else:
+            lines.append("- 当前未形成可验证的完整攻击链，以下输出基于告警与证据做兜底关联。")
+            clues = self._build_fallback_stage_clues(evidence or [], alerts or [])
+            if clues:
+                lines.append(f"\n### 3.3 可疑阶段线索")
+                for idx, clue in enumerate(clues, start=1):
+                    lines.append(
+                        f"- **线索{idx}**: [{clue.get('tactic', 'Unknown')}] "
+                        f"{clue.get('technique_id', 'N/A')} - {clue.get('title', 'N/A')} "
+                        f"(证据数: {clue.get('evidence_count', 0)}, 置信度: {clue.get('confidence', 0):.0%})"
+                    )
+                    if clue.get("summary"):
+                        lines.append(f"  - 摘要: {clue['summary']}")
+            else:
+                lines.append("- 未提取到可用于关联的阶段线索。")
 
         # ===== 攻击溯源结果 =====
         lines.append(f"\n---")
@@ -178,20 +196,43 @@ class ReportGenerator:
         ioc_p = profile.get("ioc_profile", {})
 
         lines.append(f"\n### 7.1 IP地址")
+        has_ip = False
         for ip in ioc_p.get("c2_ips", []):
+            has_ip = True
             lines.append(f"- `{ip}` (C2)")
         for ip in ioc_p.get("internal_pivots", []):
+            has_ip = True
             lines.append(f"- `{ip}` (横向移动跳板)")
+        if not has_ip:
+            for ip in verdict.get("iocs", {}).get("ips", [])[:10]:
+                has_ip = True
+                lines.append(f"- `{ip}`")
+        if not has_ip:
+            lines.append("- 未提取到明确IP IOC，但已保留证据索引用于后续核验。")
 
         if ioc_p.get("domains"):
             lines.append(f"\n### 7.2 域名")
             for d in ioc_p["domains"]:
+                lines.append(f"- `{d}`")
+        elif verdict.get("iocs", {}).get("domains"):
+            lines.append(f"\n### 7.2 域名")
+            for d in verdict.get("iocs", {}).get("domains", [])[:10]:
                 lines.append(f"- `{d}`")
 
         if ioc_p.get("tools_hashes"):
             lines.append(f"\n### 7.3 文件哈希")
             for h in ioc_p["tools_hashes"]:
                 lines.append(f"- `{h}`")
+
+        evidence = evidence or []
+        if evidence:
+            lines.append(f"\n### 7.4 关键证据摘要")
+            for ev in evidence[:5]:
+                summary = self._summarize_evidence(ev)
+                lines.append(
+                    f"- `{ev.get('evidence_id', 'N/A')}` "
+                    f"[{ev.get('tactic', 'Unknown')}] {ev.get('technique_id', 'N/A')} - {summary}"
+                )
 
         # ===== 方法论 =====
         lines.append(f"\n---")
@@ -305,3 +346,48 @@ class ReportGenerator:
                 else:
                     counts["low"] += 1
         return counts
+
+    def _build_fallback_stage_clues(self, evidence: list[dict], alerts: list[dict]) -> list[dict]:
+        clues: list[dict] = []
+        for ev in evidence[:8]:
+            clues.append({
+                "tactic": ev.get("tactic", "Unknown"),
+                "technique_id": ev.get("technique_id", "N/A"),
+                "title": ev.get("technique_name", "N/A"),
+                "evidence_count": len(ev.get("raw_events", []) or []),
+                "confidence": 0.65,
+                "summary": self._summarize_evidence(ev),
+            })
+        if clues:
+            return clues
+
+        for alert in alerts[:8]:
+            clues.append({
+                "tactic": alert.get("tactic", "Unknown"),
+                "technique_id": alert.get("technique_id", "N/A"),
+                "title": alert.get("technique_name", alert.get("title", "N/A")),
+                "evidence_count": 1,
+                "confidence": float(alert.get("confidence", 0.5) or 0.5),
+                "summary": alert.get("description", ""),
+            })
+        return clues
+
+    def _summarize_evidence(self, evidence: dict) -> str:
+        raw_events = evidence.get("raw_events", []) or []
+        if raw_events:
+            first = raw_events[0]
+            entities = first.get("entities", {}) if isinstance(first.get("entities"), dict) else {}
+            parts = [
+                str(first.get("event_type") or ""),
+                str(first.get("host_ip") or ""),
+                str(entities.get("process_name") or ""),
+                str(entities.get("command_line") or "")[:80],
+                str(entities.get("dst_ip") or ""),
+                str(entities.get("file_path") or ""),
+            ]
+            text = " | ".join([p for p in parts if p]).strip()
+            if text:
+                return text
+        ips = ", ".join((evidence.get("ips_involved") or [])[:3])
+        procs = ", ".join((evidence.get("processes_involved") or [])[:3])
+        return f"IPs: {ips or 'N/A'}; Processes: {procs or 'N/A'}"
