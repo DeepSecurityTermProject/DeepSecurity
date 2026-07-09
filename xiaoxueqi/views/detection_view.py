@@ -223,7 +223,6 @@ def api_analyze():
         "ok": True,
         "data": {
             "detection": {
-            "detection": {
                 "alerts_count": len(alerts),
                 "stats": llm_detector.get_stats()
             },
