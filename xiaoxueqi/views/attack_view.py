@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import threading
 import os
+import json
 
 from flask import Blueprint, jsonify, render_template, request
 
@@ -136,7 +137,6 @@ def api_report_detail(scenario_id: str):
 
     report_json = report_data.get("report_json", {})
     if isinstance(report_json, str):
-        import json
         try: report_json = json.loads(report_json)
         except: report_json = {}
 
@@ -157,42 +157,145 @@ def api_report_detail(scenario_id: str):
 def api_graph_summary(scenario_id: str):
     try:
         data = serializer.get_attack_chain_summary(scenario_id)
-        return jsonify({"ok": True, "data": data})
+        # 如果有数据返回，加入 mode 标记
+        if data.get("nodes") or data.get("edges"):
+            return jsonify({"ok": True, "data": data, "mode": "neo4j"})
     except Exception as e:
-        # Neo4j 不可用，从 DataBridge 构建简单图
-        bridge = get_bridge()
-        reports = bridge.query("AttackReports", where={"scenario_id": scenario_id}, limit=1)
-        nodes = []
-        edges = []
-        if reports:
-            report = reports[0].get("report_json", {})
-            if isinstance(report, str):
-                import json
-                try: report = json.loads(report)
-                except: report = {}
-            chain = report.get("attack_chain", [])
-            for i, tech in enumerate(chain):
-                nodes.append({"id": f"tech_{i}", "label": tech, "type": "technique"})
-                if i > 0:
-                    edges.append({"source": f"tech_{i-1}", "target": f"tech_{i}", "label": "NEXT"})
-            victim = report.get("victim_ip", "?")
-            attacker = report.get("attacker_ip", "?")
-            nodes.append({"id": "victim", "label": f"Victim: {victim}", "type": "host"})
-            nodes.append({"id": "attacker", "label": f"Attacker: {attacker}", "type": "threat"})
-            if chain:
-                edges.append({"source": "attacker", "target": "tech_0", "label": "INITIATES"})
-                edges.append({"source": f"tech_{len(chain)-1}", "target": "victim", "label": "TARGETS"})
-        return jsonify({"ok": True, "data": {"nodes": nodes, "edges": edges}, "mode": "simulation"})
+        pass
+
+    # Neo4j 不可用或没有数据，从 DataBridge 构建简单图
+    bridge = get_bridge()
+    reports = bridge.query("AttackReports", where={"scenario_id": scenario_id}, limit=1)
+    nodes = []
+    edges = []
+    if reports:
+        report = reports[0].get("report_json", {})
+        if isinstance(report, str):
+            try: report = json.loads(report)
+            except: report = {}
+        chain = report.get("attack_chain", [])
+        for i, tech in enumerate(chain):
+            node = {"id": f"tech_{i}", "label": tech, "type": "technique"}
+            # 尝试从链式条目中提取技术ID
+            if ": " in tech:
+                parts = tech.split(": ", 1)
+                node["label"] = parts[1]
+                node["title"] = f"TID: {parts[0]}\nTechnique: {parts[1]}"
+            nodes.append(node)
+            if i > 0:
+                edges.append({
+                    "source": f"tech_{i-1}", "target": f"tech_{i}",
+                    "label": "NEXT", "edge_type": "temporal",
+                    "confidence": "Low", "evidence_source": "simulation"
+                })
+        victim = report.get("victim_ip", "?")
+        attacker = report.get("attacker_ip", "?")
+        nodes.append({"id": "victim", "label": f"Victim: {victim}", "type": "host"})
+        nodes.append({"id": "attacker", "label": f"Attacker: {attacker}", "type": "threat"})
+        if chain:
+            edges.append({"source": "attacker", "target": "tech_0",
+                          "label": "INITIATES", "edge_type": "init",
+                          "confidence": "High", "evidence_source": "simulation"})
+            edges.append({"source": f"tech_{len(chain)-1}", "target": "victim",
+                          "label": "TARGETS", "edge_type": "target",
+                          "confidence": "High", "evidence_source": "simulation"})
+    return jsonify({"ok": True, "data": {"nodes": nodes, "edges": edges}, "mode": "simulation"})
 
 
 @bp.route("/api/graph/<scenario_id>/topology", methods=["GET"])
 def api_graph_topology(scenario_id: str):
     try:
         data = serializer.get_scenario_topology(scenario_id)
-        return jsonify({"ok": True, "data": data})
+        if data.get("nodes") or data.get("edges"):
+            return jsonify({"ok": True, "data": data, "mode": "neo4j"})
     except Exception:
-        # Neo4j 不可用，降级
-        return jsonify({"ok": True, "data": {"nodes": [], "edges": []}, "mode": "simulation"})
+        pass
+
+    # Neo4j 不可用，降级
+    return jsonify({"ok": True, "data": {"nodes": [], "edges": []}, "mode": "simulation"})
+
+
+# =========================================================================
+# [新增 API] 横向移动路径
+# =========================================================================
+@bp.route("/api/graph/<scenario_id>/lateral", methods=["GET"])
+def api_graph_lateral(scenario_id: str):
+    """获取指定场景的横向移动路径"""
+    try:
+        data = serializer.get_lateral_movement_paths(scenario_id)
+        if data.get("lateral_paths"):
+            return jsonify({"ok": True, "data": data, "mode": "neo4j"})
+    except Exception:
+        pass
+
+    # Fallback: 从 DataBridge 报告提取
+    bridge = get_bridge()
+    reports = bridge.query("AttackReports", where={"scenario_id": scenario_id}, limit=1)
+    lateral_paths = []
+    if reports:
+        report = reports[0].get("report_json", {})
+        if isinstance(report, str):
+            try: report = json.loads(report)
+            except: report = {}
+        rca = report.get("root_cause_analysis", {})
+        intruder_ip = rca.get("intruder_ip", "")
+        victim_ip = reports[0].get("victim_ip", "")
+        if intruder_ip and victim_ip:
+            lateral_paths.append({
+                "source_host": intruder_ip,
+                "target_host": victim_ip,
+                "credential": rca.get("user", ""),
+                "technique": "Remote Services (simulated)",
+                "timestamp": reports[0].get("start_time", ""),
+                "description": f"Simulated lateral movement from {intruder_ip} to {victim_ip}"
+            })
+    return jsonify({"ok": True, "data": {"lateral_paths": lateral_paths}, "mode": "simulation"})
+
+
+# =========================================================================
+# [新增 API] 边证据详情
+# =========================================================================
+@bp.route("/api/graph/edge/evidence", methods=["GET"])
+def api_edge_evidence():
+    """获取两条 AttackEvent 之间边的详细信息（证据来源、置信度、时间间隔）"""
+    from_id = request.args.get("from_id", "")
+    to_id = request.args.get("to_id", "")
+    rel_type = request.args.get("rel_type", None)
+
+    if not from_id or not to_id:
+        return jsonify({"ok": False, "error": "Missing from_id or to_id"}), 400
+
+    try:
+        if rel_type:
+            data = serializer.get_edge_evidence(from_id, to_id, rel_type)
+        else:
+            data = serializer.get_edge_evidence(from_id, to_id)
+        if data.get("evidence"):
+            return jsonify({"ok": True, "data": data})
+    except Exception:
+        pass
+
+    # Fallback
+    return jsonify({"ok": True, "data": {"evidence": {
+        "type": "simulated",
+        "confidence": "Medium",
+        "evidence_source": "simulation_fallback",
+        "description": "No detailed edge evidence available (Neo4j unavailable)"
+    }}})
+
+
+# =========================================================================
+# [新增 API] 场景所有边详情
+# =========================================================================
+@bp.route("/api/graph/<scenario_id>/edges", methods=["GET"])
+def api_scenario_edges(scenario_id: str):
+    """获取场景中所有边的详细信息"""
+    try:
+        data = serializer.get_attack_chain_summary(scenario_id)
+        edges = data.get("edges", [])
+        return jsonify({"ok": True, "data": {"edges": edges}, "mode": "neo4j"})
+    except Exception:
+        return jsonify({"ok": True, "data": {"edges": []}, "mode": "simulation"})
 
 
 @bp.route("/api/system/status", methods=["GET"])

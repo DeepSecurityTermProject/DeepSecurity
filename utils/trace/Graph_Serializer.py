@@ -1,7 +1,8 @@
 from neo4j import GraphDatabase
 
 #-------------------------------------------------------------------------------------------------
-# 对接前端 vis-network 。它负责执行 Cypher 查询，并将结果转化为 Nodes/Edges 结构。
+# 对接前端 vis-network。它负责执行 Cypher 查询，并将结果转化为 Nodes/Edges 结构。
+# [增强] 增加边证据信息、置信度、时间间隔等属性用于前端展示
 #-------------------------------------------------------------------------------------------------
 class GraphSerializer:
     def __init__(self, uri, user, password):
@@ -10,10 +11,24 @@ class GraphSerializer:
     def close(self):
         self.driver.close()
 
+    def _run_query(self, query, **kwargs):
+        """安全执行查询，失败返回空列表"""
+        try:
+            with self.driver.session() as session:
+                result = session.run(query, **kwargs)
+                return result.data()
+        except Exception as e:
+            from urllib.parse import urlparse
+            from utils.data_bridge import get_bridge
+            # 记录并返回空 - 前端会 fallback
+            import logging
+            logging.warning(f"Neo4j query failed, will fallback: {e}")
+            return None
+
     def get_attack_chain_summary(self, scenario_id):
         """
         【宏观视图】仅展示 ATT&CK 战术/技术的流转
-        对应前端需求：重建后的攻击路径（高层级）
+        [增强] 返回边上的 evidence_source, confidence, time_interval
         """
         query = """
         MATCH (ae:AttackEvent)
@@ -25,106 +40,232 @@ class GraphSerializer:
         WHERE next_ae.scenario_id = $sid
 
         RETURN ae, t, r, next_ae
+        ORDER BY ae.stage_order, ae.timestamp_start
         """
-        # Vis.js 格式
         nodes = []
         edges = []
         added_nodes = set()
 
-        with self.driver.session() as session:
-            result = session.run(query, sid=scenario_id)
-            for record in result:
-                ae = record['ae']
-                t = record['t']
+        result = self._run_query(query, sid=scenario_id)
+        if result is None:
+            return {"nodes": [], "edges": []}
 
-                # 构建节点 (以 Technique 为核心展示)
-                node_id = ae['id']
-                if node_id not in added_nodes:
-                    nodes.append({
-                        "id": node_id,
-                        "label": t['name'],  # 节点显示技术名称
-                        "group": "technique",
-                        "title": f"TID: {t['id']}\nTime: {ae['timestamp_start']}",  # 鼠标悬停详情
-                        "stage": ae.get('stage_order', 0)
-                    })
-                    added_nodes.add(node_id)
+        for record in result:
+            ae = record['ae']
+            t = record['t']
 
-                # 构建边
-                next_ae = record['next_ae']
-                if next_ae:
-                    edges.append({
-                        "from": node_id,
-                        "to": next_ae['id'],
-                        "arrows": "to",
-                        "label": record['r'].get('type', 'next')
-                    })
+            node_id = ae.get('id', '')
+            if node_id and node_id not in added_nodes:
+                nodes.append({
+                    "id": node_id,
+                    "label": t.get('name', '?'),
+                    "group": "technique",
+                    "title": (
+                        f"TID: {t.get('id', '?')}\n"
+                        f"Time: {ae.get('timestamp_start', '?')}\n"
+                        f"Victim: {ae.get('victim_ip', '?')}\n"
+                        f"Attacker: {ae.get('attacker_ip', '?')}\n"
+                        f"Rule: {ae.get('rule_id', '?')}\n"
+                        f"Confidence: {ae.get('confidence', '?')}"
+                    ),
+                    "stage": ae.get('stage_order', 0),
+                    "victim_ip": ae.get('victim_ip', ''),
+                    "attacker_ip": ae.get('attacker_ip', ''),
+                })
+                added_nodes.add(node_id)
+
+            next_ae = record.get('next_ae')
+            r = record.get('r')
+            if next_ae and r:
+                edge = {
+                    "from": node_id,
+                    "to": next_ae.get('id', ''),
+                    "arrows": "to",
+                    "label": r.get('type', 'next'),
+                }
+                # [增强] 边属性
+                edge_data = dict(r)
+                if 'type' in edge_data:
+                    edge["edge_type"] = edge_data.get('type', 'next')
+                if 'confidence' in edge_data:
+                    edge["confidence"] = edge_data.get('confidence', 'Medium')
+                if 'evidence_source' in edge_data:
+                    edge["evidence_source"] = edge_data.get('evidence_source', '')
+                if 'time_interval' in edge_data:
+                    edge["time_interval"] = edge_data.get('time_interval', 0)
+                if 'description' in edge_data:
+                    edge["description"] = edge_data.get('description', '')
+                if 'evidence_entity' in edge_data:
+                    edge["evidence_entity"] = edge_data.get('evidence_entity', '')
+                edges.append(edge)
 
         return {"nodes": nodes, "edges": edges}
 
     def get_scenario_topology(self, scenario_id):
         """
         【微观视图】展示底层的实体拓扑 (Process, File, IP)
-        修正：移除对 related 节点的 TRIGGERED 强校验，显示完整的上下文路径
-        修正：修复 unhashable type: 'dict' 错误，改用 ID 去重
+        [增强] 包含所有边类型及证据信息
         """
         query = """
         MATCH (ae:AttackEvent {scenario_id: $sid})
         MATCH (entity)-[:TRIGGERED]->(ae)
 
-        // 1. 核心实体：触发了告警的节点
         WITH collect(DISTINCT entity) AS core_entities
 
-        // 2. 上下文扩展：查找与核心实体有直接关系的节点
         UNWIND core_entities AS start_node
-        OPTIONAL MATCH path = (start_node)-[r:Spawn|Write|Read|Connect|Inject|Resolve|Load]-(related)
+        OPTIONAL MATCH path = (start_node)-[r:Spawn|Write|Read|Connect|Inject|Resolve|Load|
+                                            Traffic_Flow|Logon|Logon_Source|RUN_AS|USED_CREDENTIAL|
+                                            STARTS_SESSION|LOGGED_INTO|FAILED_LOGON|FAILED_LOGON_SOURCE|
+                                            LATERAL_MOVEMENT]-(related)
 
         RETURN start_node AS entity, collect(path) AS paths
         """
 
         nodes = {}
-        # 注意：这里我们不需要列表了，直接用字典 edges_map 来存，key 是边的 ID，天然去重
         edges_map = {}
 
-        with self.driver.session() as session:
-            result = session.run(query, sid=scenario_id)
-            for record in result:
-                # 1. 处理核心告警实体
-                self._process_node(record['entity'], nodes)
+        result = self._run_query(query, sid=scenario_id)
+        if result is None:
+            return {"nodes": [], "edges": []}
 
-                # 2. 处理扩展路径
-                paths = record['paths']
-                if paths:
-                    for p in paths:
-                        for rel in p.relationships:
-                            src = rel.start_node
-                            dst = rel.end_node
+        for record in result:
+            self._process_node(record['entity'], nodes)
 
-                            # 将关联的“背景节点”也加入节点列表
-                            self._process_node(src, nodes)
-                            self._process_node(dst, nodes)
+            paths = record['paths']
+            if paths:
+                for p in paths:
+                    for rel in p.relationships:
+                        src = rel.start_node
+                        dst = rel.end_node
 
-                            # 生成唯一的边 ID
-                            edge_key = f"{src['id']}_{rel.type}_{dst['id']}"
+                        self._process_node(src, nodes)
+                        self._process_node(dst, nodes)
 
-                            # 直接用 ID 作为 key 存入字典，实现去重
-                            if edge_key not in edges_map:
-                                edges_map[edge_key] = {
-                                    "id": edge_key,
-                                    "from": src['id'],
-                                    "to": dst['id'],
-                                    "label": rel.type,
-                                    "arrows": "to",
-                                    # 字典结构在这里是允许的，因为我们不再用 set 去重了
-                                    "color": {"color": "#ff0000"} if rel.type in ['Inject', 'Connect'] else "#848484"
-                                }
+                        edge_key = f"{src.get('id', '')}_{rel.type}_{dst.get('id', '')}"
+                        if edge_key not in edges_map:
+                            edge_obj = {
+                                "id": edge_key,
+                                "from": src.get('id', ''),
+                                "to": dst.get('id', ''),
+                                "label": rel.type,
+                                "arrows": "to",
+                                "color": {"color": "#ff0000"} if rel.type in ['Inject', 'Connect', 'LATERAL_MOVEMENT'] else "#848484"
+                            }
+                            # [增强] 复制边属性
+                            edge_data = dict(rel)
+                            if 'confidence' in edge_data:
+                                edge_obj["confidence"] = edge_data.get('confidence', 'Medium')
+                            if 'evidence_source' in edge_data:
+                                edge_obj["evidence_source"] = edge_data.get('evidence_source', '')
+                            if 'timestamp' in edge_data:
+                                edge_obj["timestamp"] = str(edge_data.get('timestamp', ''))
+                            if 'dst_port' in edge_data:
+                                edge_obj["dst_port"] = edge_data.get('dst_port', '')
+                            if 'user' in edge_data:
+                                edge_obj["user"] = edge_data.get('user', '')
+                            if 'session_id' in edge_data:
+                                edge_obj["session_id"] = edge_data.get('session_id', '')
+                            if 'process' in edge_data:
+                                edge_obj["process"] = edge_data.get('process', '')
+                            if 'logon_time' in edge_data:
+                                edge_obj["logon_time"] = str(edge_data.get('logon_time', ''))
 
-        # 将去重后的字典值转回列表
+                            # 生成证据摘要
+                            evidence_parts = []
+                            if edge_obj.get('evidence_source'):
+                                evidence_parts.append(f"Source: {edge_obj['evidence_source']}")
+                            if edge_obj.get('timestamp'):
+                                evidence_parts.append(f"Time: {edge_obj['timestamp']}")
+                            if edge_obj.get('confidence'):
+                                evidence_parts.append(f"Conf: {edge_obj['confidence']}")
+                            if evidence_parts:
+                                edge_obj["evidence_summary"] = " | ".join(evidence_parts)
+
+                            edges_map[edge_key] = edge_obj
+
         return {"nodes": list(nodes.values()), "edges": list(edges_map.values())}
+
+    def get_lateral_movement_paths(self, scenario_id):
+        """
+        【横向移动路径】展示跨主机的横向移动链路
+        返回：源主机 → 凭据 → 目标主机 → 登录方式 → 后续进程
+        """
+        query = """
+        MATCH (ae:AttackEvent {scenario_id: $sid})
+        MATCH (src_host:IP)-[:Logon_Source|LATERAL_MOVEMENT]->(target_host:IP)
+        OPTIONAL MATCH (src_host)-[:USED_CREDENTIAL]->(u:User)
+        OPTIONAL MATCH (u)-[:Logon]->(target_host)
+        OPTIONAL MATCH (ae)-[:LATERAL_TO]->(target_host)
+        RETURN DISTINCT src_host, target_host, u,
+               ae.attack_id AS attack_id,
+               ae.technique_name AS technique_name,
+               ae.timestamp_start AS timestamp_start,
+               ae.description AS description
+        """
+        result = self._run_query(query, sid=scenario_id)
+        if not result:
+            return {"lateral_paths": []}
+
+        lateral_paths = []
+        added = set()
+        for record in result:
+            src = record.get('src_host', {})
+            tgt = record.get('target_host', {})
+            user = record.get('u')
+
+            # 去重
+            src_ip = src.get('ip', src.get('id', '')) if src else ''
+            tgt_ip = tgt.get('ip', tgt.get('id', '')) if tgt else ''
+            username = user.get('username', '') if user else ''
+            key = f"{src_ip}_{tgt_ip}_{username}"
+            if key in added:
+                continue
+            added.add(key)
+
+            path_info = {
+                "source_host": src_ip,
+                "target_host": tgt_ip,
+                "credential": username,
+                "attack_id": record.get('attack_id', ''),
+                "technique": record.get('technique_name', 'Lateral Movement'),
+                "timestamp": str(record.get('timestamp_start', '')),
+                "description": record.get('description', ''),
+            }
+            lateral_paths.append(path_info)
+
+        return {"lateral_paths": lateral_paths}
+
+    def get_edge_evidence(self, from_id, to_id, relationship_type=None):
+        """
+        【边证据详情】查询两条 AttackEvent 之间的边，返回证据来源、置信度、时间间隔
+        """
+        if relationship_type:
+            query = """
+            MATCH (a1)-[r:NEXT_STAGE]->(a2)
+            WHERE a1.id = $from_id AND a2.id = $to_id AND type(r) = $rel_type
+            RETURN r
+            """
+            params = {"from_id": from_id, "to_id": to_id, "rel_type": relationship_type}
+        else:
+            query = """
+            MATCH (a1)-[r:NEXT_STAGE]->(a2)
+            WHERE a1.id = $from_id AND a2.id = $to_id
+            RETURN r
+            """
+            params = {"from_id": from_id, "to_id": to_id}
+
+        result = self._run_query(query, **params)
+        if not result:
+            return {"evidence": None}
+
+        r = result[0].get('r', {})
+        evidence = dict(r)
+        return {"evidence": evidence}
 
     def _process_node(self, neo4j_node, nodes_dict):
         """辅助函数：处理 Neo4j 节点转 Vis.js 格式，包含样式配置"""
-        n_id = neo4j_node.get('id')  # 使用你的唯一标识
-        if n_id in nodes_dict:
+        n_id = neo4j_node.get('id')
+        if not n_id or n_id in nodes_dict:
             return
 
         labels = list(neo4j_node.labels)
@@ -137,7 +278,8 @@ class GraphSerializer:
             "IP": "🌐",
             "Domain": "🔗",
             "Registry": "®️",
-            "User": "👤"
+            "User": "👤",
+            "Session": "🔑",
         }
 
         # 构造 Label 显示
@@ -148,11 +290,23 @@ class GraphSerializer:
             display_label = f"{icon_map['File']} {neo4j_node.get('name')}"
         elif main_label == "IP":
             display_label = f"{icon_map['IP']} {neo4j_node.get('ip')}"
+        elif main_label == "User":
+            display_label = f"{icon_map['User']} {neo4j_node.get('username')}"
+        elif main_label == "Session":
+            display_label = f"{icon_map['Session']} {neo4j_node.get('session_id')}"
 
-        nodes_dict[n_id] = {
+        node_obj = {
             "id": n_id,
             "label": display_label,
             "group": main_label,
-            "title": str(dict(neo4j_node)),  # 悬停显示全部属性
-            "shape": "box"
+            "title": str(dict(neo4j_node)),
+            "shape": "box",
         }
+
+        # 特殊节点样式
+        if main_label == "Session":
+            node_obj["color"] = {"background": "#fff3cd", "border": "#ffc107"}
+        elif main_label == "User":
+            node_obj["color"] = {"background": "#d1ecf1", "border": "#0c5460"}
+
+        nodes_dict[n_id] = node_obj

@@ -16,6 +16,20 @@ export function getGraphTopology(scenarioId: string) {
   return client.get(`/attack/api/graph/${scenarioId}/topology`)
 }
 
+export function getGraphLateral(scenarioId: string) {
+  return client.get(`/attack/api/graph/${scenarioId}/lateral`)
+}
+
+export function getEdgeEvidence(fromId: string, toId: string, relType?: string) {
+  const params: any = { from_id: fromId, to_id: toId }
+  if (relType) params.rel_type = relType
+  return client.get('/attack/api/graph/edge/evidence', { params })
+}
+
+export function getScenarioEdges(scenarioId: string) {
+  return client.get(`/attack/api/graph/${scenarioId}/edges`)
+}
+
 export function getSystemStatus() {
   return client.get('/attack/api/system/status')
 }
