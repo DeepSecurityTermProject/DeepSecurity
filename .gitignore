@@ -14,6 +14,7 @@ venv/
 .env.*
 !.env.example
 *.log
+!data/samples/*.log
 
 # Frontend generated dependencies/build output
 frontend/node_modules/

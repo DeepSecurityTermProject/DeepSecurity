@@ -98,16 +98,40 @@ class DataBridge:
             self._memory_store[k] = []
         self._checkpoints = {}
 
+    # ── Data source → category mapping ──────────────────────────────────
+    # Used by get_all_events() to normalize data_source for unified analysis.
+    # This mirrors the mapping in main_pipeline._NETWORK_SOURCES / _LOG_SOURCES.
+    SOURCE_TO_CATEGORY: dict[str, str] = {
+        "zeek": "network_traffic",
+        "suricata": "network_traffic",
+        "pcap": "network_traffic",
+        "netflow": "network_traffic",
+        "network_traffic": "network_traffic",
+        "windows_eventlog": "host_log",
+        "syslog": "host_log",
+        "host_log": "host_log",
+        "sysmon": "host_behavior",
+        "auditd": "host_behavior",
+        "falco": "host_behavior",
+        "host_behavior": "host_behavior",
+    }
+
     # ---- Get events for detection ----
     def get_all_events(self) -> list[dict]:
-        """合并所有数据源的事件"""
+        """合并所有数据源的事件，按 event_hash 去重。
+
+        data_source 保留原始解析器输出的值（如 "zeek"、"suricata"），
+        同时添加 _category 字段供统一分析使用。
+        """
         events = []
+        seen_hashes: set[str] = set()
+
         source_configs = [
             ("HostBehaviors", "host_behavior"),
             ("NetworkTraffic", "network_traffic"),
             ("HostLogs", "host_log"),
         ]
-        for table_name, data_source in source_configs:
+        for table_name, default_source in source_configs:
             for row in self._memory_store.get(table_name, []):
                 evt = row.get("result", row)
                 if isinstance(evt, str):
@@ -118,12 +142,26 @@ class DataBridge:
                 if not isinstance(evt, dict):
                     continue
                 evt = dict(evt)
-                evt.setdefault("data_source", data_source)
+
+                # Preserve original data_source; only set default if absent
+                evt.setdefault("data_source", default_source)
                 evt.setdefault("source_table", table_name)
                 evt.setdefault("source_record_id", row.get("id"))
                 evt.setdefault("event_hash", row.get("event_hash"))
                 evt.setdefault("host_name", row.get("host_name"))
                 evt.setdefault("timestamp", row.get("event_time_utc") or row.get("create_time") or evt.get("timestamp"))
+
+                # Add category for unified analysis (does not overwrite data_source)
+                ds = str(evt.get("data_source", "")).lower()
+                evt["_category"] = self.SOURCE_TO_CATEGORY.get(ds, default_source)
+
+                # Deduplicate by event_hash
+                eh = str(evt.get("event_hash", ""))
+                if eh and eh in seen_hashes:
+                    continue
+                if eh:
+                    seen_hashes.add(eh)
+
                 events.append(evt)
         return events
 

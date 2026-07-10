@@ -1,0 +1,15 @@
+#separator \x09
+#set_separator	,
+#empty_field	(empty)
+#unset_field	-
+#path	conn
+#open	2026-07-09-06-30-00
+#fields	ts	uid	id.orig_h	id.orig_p	id.resp_h	id.resp_p	proto	service	duration	orig_bytes	resp_bytes	conn_state	local_orig	local_resp	missed_bytes	history	orig_pkts	orig_ip_bytes	resp_pkts	resp_ip_bytes	tunnel_parents
+#types	time	string	addr	port	addr	port	enum	string	interval	count	count	string	bool	bool	count	string	count	count	count	count	set[string]
+1752085800.123456	C8abc123def45678	192.168.10.50	49152	203.0.113.50	443	tcp	ssl	12.345678	12345	567890	SF	-	-	0	ShADadFf	45	15000	60	580000	-
+1752085805.234567	C9bcd234efg56789	192.168.10.50	49153	10.0.0.1	53	udp	dns	0.012345	80	120	SF	-	-	0	Dd	2	200	2	240	-
+1752085810.345678	C0cde345fgh67890	192.168.10.100	60000	45.33.32.156	4444	tcp	-	65.432109	500000	2500000	S1	-	-	0	ShAD	1200	520000	4000	2600000	-
+1752085820.456789	C1def456ghi78901	192.168.10.50	49154	203.0.113.10	80	tcp	http	0.987654	500	80000	SF	-	-	0	ShADadFf	8	700	12	80200	-
+1752085830.567890	C2efg567hij89012	10.0.0.50	22	192.168.10.50	55123	tcp	ssh	180.123456	98765	123456	SF	-	-	0	ShADadFf	340	100000	450	135000	-
+1752085840.678901	C3fgh678ijk90123	192.168.10.50	49155	203.0.113.50	8080	tcp	http	4.567890	1024	512	S3	-	-	0	ShAD	25	2000	10	1500	-
+#close	2026-07-09-06-35-00

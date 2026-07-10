@@ -64,16 +64,38 @@ def api_status_source(source_name: str):
 # ═══════════════════════════════════════════════════════════════════════
 
 
-def _parse_source_result(result: dict, source_name: str) -> dict:
-    """Normalize ingest result dict for API response."""
-    return {
-        "ok": True,
+def _parse_source_result(result: dict, source_name: str) -> tuple[dict, int]:
+    """Normalize ingest result dict for API response.
+
+    Returns (body, http_status).
+    - 200: at least one event was inserted successfully
+    - 400: input was collected but nothing could be parsed/inserted
+    """
+    inserted = result.get("inserted", 0)
+    collected = result.get("collected", result.get("inserted", 0))
+    errors = result.get("errors", 0)
+    error_msg = result.get("error", "")
+
+    ok = inserted > 0
+    if not ok:
+        if collected > 0 and inserted == 0:
+            error_msg = error_msg or "所有输入事件均无法解析，未入库任何数据"
+        elif collected == 0 and errors > 0:
+            error_msg = error_msg or "数据加载失败"
+
+    body = {
+        "ok": ok,
         "source": source_name,
-        "inserted": result.get("inserted", 0),
+        "inserted": inserted,
         "skipped": result.get("skipped", 0),
-        "errors": result.get("errors", 0),
-        "collected": result.get("collected", result.get("inserted", 0)),
+        "errors": errors,
+        "collected": collected,
     }
+    if error_msg:
+        body["error"] = error_msg
+
+    status_code = 400 if not ok else 200
+    return body, status_code
 
 
 @bp.route("/api/ingest/sysmon", methods=["POST"])
@@ -116,7 +138,8 @@ def api_ingest_sysmon():
 
     try:
         result = ingest_sysmon_events(events=events, host_name=host_name or "sysmon-upload")
-        return jsonify(_parse_source_result(result, "sysmon"))
+        body, status = _parse_source_result(result, "sysmon")
+        return jsonify(body), status
     except Exception as exc:
         _get_logger().exception("Sysmon ingestion failed")
         return jsonify({"ok": False, "error": str(exc)}), 500
@@ -147,7 +170,8 @@ def api_ingest_auditd():
 
     try:
         result = ingest_auditd_events(events=lines, host_name=host_name or "linux-auditd")
-        return jsonify(_parse_source_result(result, "auditd"))
+        body, status = _parse_source_result(result, "auditd")
+        return jsonify(body), status
     except Exception as exc:
         _get_logger().exception("Auditd ingestion failed")
         return jsonify({"ok": False, "error": str(exc)}), 500
@@ -180,7 +204,8 @@ def api_ingest_falco():
 
     try:
         result = ingest_falco_events(events=lines, host_name=host_name or "linux-falco")
-        return jsonify(_parse_source_result(result, "falco"))
+        body, status = _parse_source_result(result, "falco")
+        return jsonify(body), status
     except Exception as exc:
         _get_logger().exception("Falco ingestion failed")
         return jsonify({"ok": False, "error": str(exc)}), 500
@@ -218,7 +243,8 @@ def api_ingest_zeek():
 
     try:
         result = ingest_zeek_log_lines(lines=lines, host_name=host_name or "zeek-sensor", log_type=log_type)
-        return jsonify(_parse_source_result(result, "zeek"))
+        body, status = _parse_source_result(result, "zeek")
+        return jsonify(body), status
     except Exception as exc:
         _get_logger().exception("Zeek ingestion failed")
         return jsonify({"ok": False, "error": str(exc)}), 500
@@ -257,7 +283,8 @@ def api_ingest_suricata():
 
     try:
         result = ingest_suricata_lines(lines=lines, host_name=host_name or "suricata-sensor")
-        return jsonify(_parse_source_result(result, "suricata"))
+        body, status = _parse_source_result(result, "suricata")
+        return jsonify(body), status
     except Exception as exc:
         _get_logger().exception("Suricata ingestion failed")
         return jsonify({"ok": False, "error": str(exc)}), 500
@@ -286,10 +313,25 @@ def api_load_samples():
     try:
         if source and source != "all":
             result = load_sample(source)
-            return jsonify({"ok": True, "results": {source: result}})
+            ok = result.get("inserted", 0) > 0
+            return jsonify({"ok": ok, "results": {source: result}})
         else:
             results = load_all_samples()
-            return jsonify({"ok": True, "results": results})
+            # A batch is fully successful only if every source inserted > 0
+            all_ok = all(
+                r.get("inserted", 0) > 0
+                for r in results.values()
+            )
+            # Build per-source error details for failed sources
+            failed_sources = [
+                name for name, r in results.items()
+                if r.get("inserted", 0) == 0
+            ]
+            body = {"ok": all_ok, "results": results}
+            if failed_sources:
+                body["failed_sources"] = failed_sources
+                body["error"] = f"以下数据源加载失败: {', '.join(failed_sources)}"
+            return jsonify(body)
     except Exception as exc:
         _get_logger().exception("Sample data loading failed")
         return jsonify({"ok": False, "error": str(exc)}), 500

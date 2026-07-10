@@ -509,32 +509,32 @@ class TestSampleDataLoader(unittest.TestCase):
     def test_load_sysmon_samples(self):
         from utils.sample_data_loader import load_sysmon_samples
         result = load_sysmon_samples(host_name="test-sysmon")
-        self.assertGreaterEqual(result.get("inserted", 0), 1,
-            f"Sysmon sample load failed: {result}")
+        self.assertGreaterEqual(result.get("inserted", 0), 5,
+            f"Sysmon sample load should insert >=5 events, got: {result}")
 
     def test_load_auditd_samples(self):
         from utils.sample_data_loader import load_auditd_samples
         result = load_auditd_samples(host_name="test-auditd")
-        self.assertGreaterEqual(result.get("inserted", 0), 1,
-            f"Auditd sample load failed: {result}")
+        self.assertGreaterEqual(result.get("inserted", 0), 5,
+            f"Auditd sample load should insert >=5 events, got: {result}")
 
     def test_load_falco_samples(self):
         from utils.sample_data_loader import load_falco_samples
         result = load_falco_samples(host_name="test-falco")
-        self.assertGreaterEqual(result.get("inserted", 0), 1,
-            f"Falco sample load failed: {result}")
+        self.assertGreaterEqual(result.get("inserted", 0), 5,
+            f"Falco sample load should insert >=5 events, got: {result}")
 
     def test_load_zeek_samples(self):
         from utils.sample_data_loader import load_zeek_samples
         result = load_zeek_samples(host_name="test-zeek")
-        self.assertGreaterEqual(result.get("inserted", 0), 1,
-            f"Zeek sample load failed: {result}")
+        self.assertGreaterEqual(result.get("inserted", 0), 5,
+            f"Zeek sample load should insert >=5 events, got: {result}")
 
     def test_load_suricata_samples(self):
         from utils.sample_data_loader import load_suricata_samples
         result = load_suricata_samples(host_name="test-suricata")
-        self.assertGreaterEqual(result.get("inserted", 0), 1,
-            f"Suricata sample load failed: {result}")
+        self.assertGreaterEqual(result.get("inserted", 0), 5,
+            f"Suricata sample load should insert >=5 events, got: {result}")
 
     def test_load_all_samples(self):
         from utils.sample_data_loader import load_all_samples
@@ -542,8 +542,8 @@ class TestSampleDataLoader(unittest.TestCase):
         for src_name in ["sysmon", "auditd", "falco", "zeek", "suricata"]:
             self.assertIn(src_name, results, f"Missing source: {src_name}")
             self.assertGreaterEqual(
-                results[src_name].get("inserted", 0), 1,
-                f"{src_name}: expected >=1 inserted, got {results[src_name]}"
+                results[src_name].get("inserted", 0), 5,
+                f"{src_name}: expected >=5 inserted, got {results[src_name]}"
             )
 
     def test_data_in_databridge(self):
@@ -553,20 +553,216 @@ class TestSampleDataLoader(unittest.TestCase):
         bridge = get_bridge()
 
         behaviors = bridge.query("HostBehaviors", limit=200)
-        self.assertGreaterEqual(len(behaviors), 8,
-            f"Expected >=8 behaviors, got {len(behaviors)}")
+        self.assertGreaterEqual(len(behaviors), 15,
+            f"Expected >=15 behaviors (sysmon+auditd+falco), got {len(behaviors)}")
 
         traffic = bridge.query("NetworkTraffic", limit=200)
-        self.assertGreaterEqual(len(traffic), 5,
-            f"Expected >=5 traffic events, got {len(traffic)}")
+        self.assertGreaterEqual(len(traffic), 10,
+            f"Expected >=10 traffic events (zeek+suricata), got {len(traffic)}")
 
     def test_get_all_events_includes_all(self):
         from utils.sample_data_loader import load_all_samples
         from utils.data_bridge import get_bridge
         load_all_samples()
         events = get_bridge().get_all_events()
-        self.assertGreaterEqual(len(events), 10,
-            f"Expected >=10 unified events, got {len(events)}")
+        self.assertGreaterEqual(len(events), 20,
+            f"Expected >=20 unified events, got {len(events)}")
+
+    def test_no_duplicate_events(self):
+        """Events should not be duplicated in get_all_events."""
+        from utils.sample_data_loader import load_all_samples
+        from utils.data_bridge import get_bridge
+        load_all_samples()
+        bridge = get_bridge()
+        events = bridge.get_all_events()
+        hashes = [e.get("event_hash") for e in events if e.get("event_hash")]
+        self.assertEqual(len(hashes), len(set(hashes)),
+            f"Found {len(hashes) - len(set(hashes))} duplicate event hashes in get_all_events()")
+
+    def test_network_traffic_classification(self):
+        """Zeek and Suricata events should be classified as network_traffic."""
+        from utils.sample_data_loader import load_all_samples
+        from utils.data_bridge import get_bridge
+        load_all_samples()
+        bridge = get_bridge()
+        events = bridge.get_all_events()
+
+        # Count by _category
+        net_count = sum(1 for e in events if e.get("_category") == "network_traffic")
+        self.assertGreater(net_count, 0,
+            f"Expected >0 network_traffic events, got {net_count}. Events: {[(e.get('data_source'), e.get('_category')) for e in events[:5]]}")
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# Host IP Semantic Tests
+# ═══════════════════════════════════════════════════════════════════════
+
+class TestHostIpSemantics(unittest.TestCase):
+    """Ensure host_ip only contains valid IPs, never hostnames."""
+
+    def test_sysmon_host_ip_is_not_computer_name(self):
+        ev = parse_sysmon_event(SYSMON_PC)
+        self.assertIsNotNone(ev)
+        # host_ip must be empty or a valid IP, never a hostname like "win-dc01.security.local"
+        hip = ev.get("host_ip", "")
+        self.assertFalse(
+            ".security.local" in str(hip) or "win-dc01" in str(hip),
+            f"host_ip should not contain hostname, got: {hip}"
+        )
+        # host_name may contain the computer name
+        self.assertIn("win-dc01", ev.get("host_name", ""))
+
+    def test_zeek_host_ip_is_not_sensor_name(self):
+        ev = parse_zeek_log(ZEEK_CONN, log_type="conn", fields=ZEEK_CONN_FIELDS, host_name="zeek-sensor-prod")
+        self.assertIsNotNone(ev)
+        hip = ev.get("host_ip", "")
+        self.assertEqual(hip, "",
+            f"host_ip should be empty (not the sensor name), got: {hip}")
+        self.assertEqual(ev.get("host_name"), "zeek-sensor-prod")
+
+    def test_suricata_host_ip_is_not_sensor_name(self):
+        ev = parse_suricata_eve(SURICATA_ALERT, host_name="suricata-gw-01")
+        self.assertIsNotNone(ev)
+        hip = ev.get("host_ip", "")
+        self.assertEqual(hip, "",
+            f"host_ip should be empty (not the sensor name), got: {hip}")
+        self.assertEqual(ev.get("host_name"), "suricata-gw-01")
+
+    def test_sysmon_host_ip_override(self):
+        """host_ip override should accept valid IPs."""
+        ev = parse_sysmon_event(SYSMON_PC, host_ip="192.168.1.100", host_name="custom-host")
+        self.assertIsNotNone(ev)
+        self.assertEqual(ev["host_ip"], "192.168.1.100")
+        self.assertEqual(ev["host_name"], "custom-host")
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# Status Error Tracking Tests
+# ═══════════════════════════════════════════════════════════════════════
+
+class TestStatusErrorTracking(unittest.TestCase):
+    """Verify error state is preserved on failure and cleared on success."""
+
+    def setUp(self):
+        self.tracker = get_status_tracker()
+        self.tracker.clear()
+        _register_default_sources()
+
+    def tearDown(self):
+        self.tracker.clear()
+
+    def test_error_preserves_last_error_info(self):
+        """After record_error + record_ingestion, last_error should be preserved."""
+        self.tracker.reset_source("test-err")
+        self.tracker.register_source("test-err")
+        # Simulate a failed batch: record_error first, then record_ingestion with errors=0
+        self.tracker.record_error("test-err", "connection timeout")
+        self.tracker.record_ingestion("test-err", inserted=0, skipped=0, errors=0)
+        src = self.tracker.get_status("test-err")
+        self.assertEqual(src["last_error"], "connection timeout")
+        self.assertIsNotNone(src["last_error_time"])
+        self.assertEqual(src["total_errors"], 1)
+
+    def test_successful_batch_clears_error(self):
+        """A fully successful batch should clear previous error state."""
+        self.tracker.reset_source("test-clr")
+        self.tracker.register_source("test-clr")
+        # First: error
+        self.tracker.record_error("test-clr", "network failure")
+        self.tracker.record_ingestion("test-clr", inserted=0, skipped=0, errors=0)
+        self.assertEqual(self.tracker.get_status("test-clr")["last_error"], "network failure")
+        # Then: success
+        self.tracker.record_ingestion("test-clr", inserted=10, skipped=2, errors=0)
+        src = self.tracker.get_status("test-clr")
+        self.assertIsNone(src["last_error"])
+        self.assertIsNone(src["last_error_time"])
+        self.assertEqual(src["consecutive_errors"], 0)
+        self.assertEqual(src["status"], "healthy")
+
+    def test_record_ingestion_without_prior_record_error(self):
+        """record_ingestion with errors>0 when no prior record_error was called."""
+        self.tracker.reset_source("test-direct")
+        self.tracker.register_source("test-direct")
+        self.tracker.record_ingestion("test-direct", inserted=0, skipped=0, errors=3)
+        src = self.tracker.get_status("test-direct")
+        self.assertEqual(src["total_errors"], 3)
+        self.assertEqual(src["consecutive_errors"], 1)
+
+    def test_no_double_count_when_both_called(self):
+        """record_error + record_ingestion(errors=0) should only count error once."""
+        self.tracker.reset_source("test-double")
+        self.tracker.register_source("test-double")
+        self.tracker.record_error("test-double", "disk full")
+        self.tracker.record_ingestion("test-double", inserted=0, skipped=0, errors=0)
+        src = self.tracker.get_status("test-double")
+        self.assertEqual(src["total_errors"], 1, "errors should only be counted once")
+        self.assertEqual(src["consecutive_errors"], 1)
+
+    def test_failure_then_query_status_shows_error(self):
+        """After failure, status API must show the error."""
+        self.tracker.reset_source("test-query")
+        self.tracker.register_source("test-query")
+        self.tracker.record_ingestion("test-query", inserted=5, skipped=0, errors=0)
+        self.tracker.record_error("test-query", "disk I/O error")
+        self.tracker.record_ingestion("test-query", inserted=0, skipped=0, errors=0)
+        src = self.tracker.get_status("test-query")
+        self.assertEqual(src["last_error"], "disk I/O error")
+        self.assertIsNotNone(src["last_error_time"])
+
+    def test_success_after_failure_restores_health(self):
+        """After a successful batch following failures, status should be healthy."""
+        self.tracker.reset_source("test-recover")
+        self.tracker.register_source("test-recover")
+        # Initial success to set last_ingestion_time
+        self.tracker.record_ingestion("test-recover", inserted=1, skipped=0, errors=0)
+        # Two failures
+        self.tracker.record_error("test-recover", "fail1")
+        self.tracker.record_ingestion("test-recover", inserted=0, skipped=0, errors=0)
+        self.tracker.record_error("test-recover", "fail2")
+        self.tracker.record_ingestion("test-recover", inserted=0, skipped=0, errors=0)
+        # Recovery
+        self.tracker.record_ingestion("test-recover", inserted=10, skipped=0, errors=0)
+        src = self.tracker.get_status("test-recover")
+        self.assertEqual(src["status"], "healthy")
+        self.assertIsNone(src["last_error"])
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# Invalid Input Tests
+# ═══════════════════════════════════════════════════════════════════════
+
+class TestInvalidInput(unittest.TestCase):
+    """Verify that completely unparseable input is handled gracefully."""
+
+    def test_sysmon_invalid_xml_batch(self):
+        results = parse_sysmon_batch(["<not>valid</xml>", "<also>bad</xml>"])
+        self.assertEqual(len(results), 0,
+            f"Expected 0 parsed events from invalid XML, got {len(results)}")
+
+    def test_auditd_all_unrecognized_lines(self):
+        lines = [
+            "type=SOMETHING_UNKNOWN msg=audit(100.0:1): comm=test exe=/bin/test",
+            "type=ANOTHER_UNKNOWN msg=audit(100.0:2): comm=test2 exe=/bin/test2",
+            "not even an audit line at all",
+            "",
+        ]
+        results = parse_auditd_lines(lines)
+        self.assertEqual(len(results), 0,
+            f"Expected 0 parsed events from invalid auditd lines, got {len(results)}")
+
+    def test_falco_all_invalid_json(self):
+        lines = ["not json", "still not json", "{broken", ""]
+        results = parse_falco_lines(lines)
+        self.assertEqual(len(results), 0,
+            f"Expected 0 parsed events from invalid Falco JSON, got {len(results)}")
+
+    def test_suricata_all_invalid_json(self):
+        for bad in ["not json", "", None]:
+            self.assertIsNone(parse_suricata_eve(bad))
+
+    def test_zeek_all_invalid_lines(self):
+        for bad in ["", None, "#just a comment", "#separator \x09"]:
+            self.assertIsNone(parse_zeek_log(bad))
 
 
 if __name__ == "__main__":

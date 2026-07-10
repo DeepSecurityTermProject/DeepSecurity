@@ -78,7 +78,17 @@ class DataSourceStatusTracker:
         errors: int = 0,
         host_name: str | None = None,
     ) -> None:
-        """Record a successful ingestion batch."""
+        """Record an ingestion batch result.
+
+        IMPORTANT: Callers that already called record_error() for the same batch
+        MUST pass errors=0 to avoid double-counting. Use one of these patterns:
+
+          Pattern A (preferred): record_error() then record_ingestion(errors=0)
+          Pattern B (simple):     record_ingestion(errors=N) without record_error
+
+        Error state (last_error, last_error_time) and consecutive_errors are
+        only cleared when inserted > 0 AND errors == 0 (fully successful batch).
+        """
         now = _utc_now_iso()
         with self._lock:
             src = self._sources.setdefault(source_name, {})
@@ -88,18 +98,28 @@ class DataSourceStatusTracker:
             src["last_ingestion_time"] = now
             src["total_inserted"] = src.get("total_inserted", 0) + inserted
             src["total_skipped"] = src.get("total_skipped", 0) + skipped
-            src["total_errors"] = src.get("total_errors", 0) + errors
             src["host_name"] = host_name or src.get("host_name")
-            if errors > 0:
-                src["consecutive_errors"] = src.get("consecutive_errors", 0) + 1
-            else:
+            src["total_errors"] = src.get("total_errors", 0) + errors
+
+            if inserted > 0 and errors == 0:
+                # Fully successful batch — reset error state
                 src["consecutive_errors"] = 0
+                src["last_error"] = None
+                src["last_error_time"] = None
+            elif errors > 0:
+                src["consecutive_errors"] = src.get("consecutive_errors", 0) + 1
+            # else: inserted == 0 and errors == 0 — no change to error state
+
             src["status"] = self._compute_health(src)
-            src["last_error"] = None
-            src["last_error_time"] = None
 
     def record_error(self, source_name: str, error_msg: str) -> None:
-        """Record an ingestion error."""
+        """Record an ingestion error.
+
+        Call this BEFORE record_ingestion() for the same batch with errors=0,
+        so that total_errors is not double-counted.
+
+        Alternatively, just call record_ingestion(errors=N) without record_error.
+        """
         now = _utc_now_iso()
         with self._lock:
             src = self._sources.setdefault(source_name, {})

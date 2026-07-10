@@ -123,6 +123,10 @@ def _run_with_databridge(time_start: str = "", time_end: str = ""):
 
     all_events = bridge.get_all_events()
 
+    # Deduplicate by event_hash (get_all_events already deduplicates within DataBridge,
+    # but scenario_manager may return duplicates of DataBridge events)
+    seen_hashes = {str(e.get("event_hash", "")): True for e in all_events if e.get("event_hash")}
+
     # Also read from scenario_manager
     try:
         from utils.scenarios.scenario_manager import get_scenario_manager
@@ -131,6 +135,11 @@ def _run_with_databridge(time_start: str = "", time_end: str = ""):
         for evt in raw_events:
             ds = evt.get("data_source", "host_behavior")
             evt.setdefault("data_source", ds)
+            eh = str(evt.get("event_hash", ""))
+            if eh and eh in seen_hashes:
+                continue
+            if eh:
+                seen_hashes[eh] = True
             all_events.append(evt)
     except Exception:
         pass
@@ -334,10 +343,24 @@ def multi_source_llm_analysis(time_start: str = "", time_end: str = "") -> dict:
 
     # 1) Collect events from all 3 sources (SQL Server + DataBridge + scenario)
     all_events = bridge.get_all_events()
+
+    # Track seen hashes to prevent duplicates across sources
+    seen_hashes: dict[str, bool] = {}
+    for e in all_events:
+        eh = str(e.get("event_hash", ""))
+        if eh:
+            seen_hashes[eh] = True
+
     try:
         from utils.scenarios.scenario_manager import get_scenario_manager
         mgr = get_scenario_manager()
-        all_events.extend(mgr.get_events(limit=5000))
+        for evt in mgr.get_events(limit=5000):
+            eh = str(evt.get("event_hash", ""))
+            if eh and eh in seen_hashes:
+                continue
+            if eh:
+                seen_hashes[eh] = True
+            all_events.append(evt)
     except: pass
 
     # Also try to read from SQL Server directly
@@ -347,6 +370,11 @@ def multi_source_llm_analysis(time_start: str = "", time_end: str = "") -> dict:
         from utils.winlog.storage.hostlogs_sqlserver import list_hostlogs, parse_result_json as _prj3
 
         for row in list_hostbehaviors(offset=0, limit=2000, host_name=None):
+            eh = str(row.event_hash or "")
+            if eh and eh in seen_hashes:
+                continue
+            if eh:
+                seen_hashes[eh] = True
             ev = _attach_source_meta(
                 _prj2(row.result),
                 table="HostBehaviors",
@@ -357,6 +385,11 @@ def multi_source_llm_analysis(time_start: str = "", time_end: str = "") -> dict:
             )
             all_events.append(ev)
         for row in list_networktraffic(offset=0, limit=2000, host_name=None):
+            eh = str(row.event_hash or "")
+            if eh and eh in seen_hashes:
+                continue
+            if eh:
+                seen_hashes[eh] = True
             ev = _attach_source_meta(
                 _prj(row.result),
                 table="NetworkTraffic",
@@ -367,6 +400,11 @@ def multi_source_llm_analysis(time_start: str = "", time_end: str = "") -> dict:
             )
             all_events.append(ev)
         for row in list_hostlogs(offset=0, limit=2000, host_name=None):
+            eh = str(getattr(row, "event_hash", "") or "")
+            if eh and eh in seen_hashes:
+                continue
+            if eh:
+                seen_hashes[eh] = True
             ev = _attach_source_meta(
                 _prj3(row.result),
                 table="HostLogs",
@@ -394,13 +432,31 @@ def multi_source_llm_analysis(time_start: str = "", time_end: str = "") -> dict:
     if not all_events:
         return {"ok": False, "error": "No events found in selected time range"}
 
-    # 2) Count by source
+    # 2) Count by source — map data_source values to analysis categories
+    # Data sources that represent network traffic (even if stored elsewhere):
+    _NETWORK_SOURCES = {"network_traffic", "zeek", "suricata", "pcap", "netflow"}
+    # Data sources that represent host logs:
+    _LOG_SOURCES = {"host_log", "windows_eventlog", "syslog"}
+    # Everything else is treated as host behavior
+
     source_counts = {"HostLogs": 0, "HostBehaviors": 0, "NetworkTraffic": 0}
     for e in all_events:
-        ds = e.get("data_source", "host_behavior")
-        if ds == "host_log": source_counts["HostLogs"] += 1
-        elif ds == "network_traffic": source_counts["NetworkTraffic"] += 1
-        else: source_counts["HostBehaviors"] += 1
+        ds = str(e.get("data_source", "")).lower()
+        src_table = str(e.get("source_table", "")).lower()
+
+        # Prefer source_table for classification when available
+        if src_table == "networktraffic":
+            source_counts["NetworkTraffic"] += 1
+        elif src_table == "hostlogs":
+            source_counts["HostLogs"] += 1
+        elif src_table == "hostbehaviors":
+            source_counts["HostBehaviors"] += 1
+        elif ds in _NETWORK_SOURCES:
+            source_counts["NetworkTraffic"] += 1
+        elif ds in _LOG_SOURCES:
+            source_counts["HostLogs"] += 1
+        else:
+            source_counts["HostBehaviors"] += 1
 
     # 3) ATT&CK rule matching
     all_matches = []

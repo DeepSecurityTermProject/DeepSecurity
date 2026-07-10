@@ -68,7 +68,7 @@ def ingest_zeek_entries(
     if errors > 0:
         tracker.record_error("zeek", f"{errors} errors during Zeek ingestion")
     tracker.record_ingestion(
-        "zeek", inserted=inserted, skipped=skipped, errors=errors, host_name=host_name,
+        "zeek", inserted=inserted, skipped=skipped, errors=0, host_name=host_name,
     )
 
     return {"inserted": inserted, "skipped": skipped, "errors": errors}
@@ -183,7 +183,7 @@ def ingest_suricata_entries(
     if errors > 0:
         tracker.record_error("suricata", f"{errors} errors during Suricata ingestion")
     tracker.record_ingestion(
-        "suricata", inserted=inserted, skipped=skipped, errors=errors, host_name=host_name,
+        "suricata", inserted=inserted, skipped=skipped, errors=0, host_name=host_name,
     )
 
     return {"inserted": inserted, "skipped": skipped, "errors": errors}

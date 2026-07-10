@@ -265,7 +265,7 @@ def _parse_sysmon_xml(xml_string: str) -> dict[str, Any]:
     return {
         "timestamp": timestamp,
         "data_source": "sysmon",
-        "host_ip": computer or "",
+        "host_ip": "",
         "host_name": computer or "",
         "event_type": event_type,
         "action": action,

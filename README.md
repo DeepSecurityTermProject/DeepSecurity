@@ -34,6 +34,7 @@
 - `docs/architecture/`：架构分类说明。
 - `docs/development/`：团队协作开发流程、分支规范、PR 规范和 Reviewer 检查清单。
 - `docs/project/`：项目选题、数据库、接口、测试环境和客户端配置文档。
+- `docs/datasource_access_guide.md`：**数据源接入说明**（Sysmon / Auditd / Falco / Zeek / Suricata 格式、API 示例与验证命令）。
 - `docs/` 根目录：实验报告、开源项目对比、演示录制和网络环境搭建指南。
 
 ## 环境要求

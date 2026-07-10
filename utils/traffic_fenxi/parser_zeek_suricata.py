@@ -278,7 +278,7 @@ def parse_zeek_log(
     return {
         "timestamp": timestamp,
         "data_source": "zeek",
-        "host_ip": host_name or "",
+        "host_ip": "",
         "host_name": host_name or "",
         "src_ip": src_ip or "",
         "dst_ip": dst_ip or "",
@@ -541,7 +541,7 @@ def parse_suricata_eve(
     return {
         "timestamp": timestamp,
         "data_source": "suricata",
-        "host_ip": host_name or "",
+        "host_ip": "",
         "host_name": host_name or "",
         "src_ip": src_ip or "",
         "dst_ip": dst_ip or "",

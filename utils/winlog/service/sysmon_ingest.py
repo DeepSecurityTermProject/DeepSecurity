@@ -99,7 +99,7 @@ def ingest_sysmon_events(
             errors += 1
             logger.warning("插入 Sysmon 事件失败: %s", exc)
 
-    # Update status tracker
+    # Update status tracker (record_error + record_ingestion with errors=0 to avoid double-counting)
     tracker = get_status_tracker()
     if errors > 0:
         tracker.record_error("sysmon", f"{errors} errors during Sysmon ingestion")
@@ -107,7 +107,7 @@ def ingest_sysmon_events(
         "sysmon",
         inserted=inserted,
         skipped=skipped,
-        errors=errors,
+        errors=0,
         host_name=host_name,
     )
 
