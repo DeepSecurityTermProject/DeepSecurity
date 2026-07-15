@@ -189,13 +189,14 @@ class GraphSerializer:
         """
         【横向移动路径】展示跨主机的横向移动链路
         返回：源主机 → 凭据 → 目标主机 → 登录方式 → 后续进程
+        强制绑定到当前 scenario_id 的 AttackEvent，防止多场景数据串场
         """
         query = """
         MATCH (ae:AttackEvent {scenario_id: $sid})
-        MATCH (src_host:IP)-[:Logon_Source|LATERAL_MOVEMENT]->(target_host:IP)
+        MATCH (ae)-[:LATERAL_TO]->(target_host:IP)
+        MATCH (src_host:IP)-[:Logon_Source|LATERAL_MOVEMENT]->(target_host)
         OPTIONAL MATCH (src_host)-[:USED_CREDENTIAL]->(u:User)
         OPTIONAL MATCH (u)-[:Logon]->(target_host)
-        OPTIONAL MATCH (ae)-[:LATERAL_TO]->(target_host)
         RETURN DISTINCT src_host, target_host, u,
                ae.attack_id AS attack_id,
                ae.technique_name AS technique_name,
@@ -242,7 +243,7 @@ class GraphSerializer:
         if relationship_type:
             query = """
             MATCH (a1)-[r:NEXT_STAGE]->(a2)
-            WHERE a1.id = $from_id AND a2.id = $to_id AND type(r) = $rel_type
+            WHERE a1.id = $from_id AND a2.id = $to_id AND r.type = $rel_type
             RETURN r
             """
             params = {"from_id": from_id, "to_id": to_id, "rel_type": relationship_type}

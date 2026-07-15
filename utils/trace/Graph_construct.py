@@ -418,6 +418,7 @@ class GraphIngestionEngine:
             t.tactic_name = data.tactic.name
         MERGE (ae:AttackEvent {id: data.attack_id})
         ON CREATE SET
+            ae.attack_id = data.attack_id,
             ae.confidence = data.confidence,
             ae.timestamp_start = data.timestamp_start,
             ae.timestamp_end = data.timestamp_end,
@@ -508,7 +509,6 @@ class GraphIngestionEngine:
         MATCH (e)-[:TRIGGERED]->(a1:AttackEvent)
         MATCH (e)-[:TRIGGERED]->(a2:AttackEvent)
         WHERE a1.id <> a2.id
-          AND a1.attack_id <> a2.attack_id
           AND datetime(a1.timestamp_start) <= datetime(a2.timestamp_start)
           AND duration.inSeconds(datetime(a1.timestamp_start), datetime(a2.timestamp_start)).seconds < $window
         MERGE (a1)-[r:NEXT_STAGE]->(a2)
@@ -531,7 +531,7 @@ class GraphIngestionEngine:
         causal_query = """
         MATCH (a1:AttackEvent)
         MATCH (a2:AttackEvent)
-        WHERE a1.attack_id <> a2.attack_id
+        WHERE a1.id <> a2.id
           AND datetime(a1.timestamp_start) <= datetime(a2.timestamp_start)
           AND duration.inSeconds(datetime(a1.timestamp_start), datetime(a2.timestamp_start)).seconds < $window
         AND (

@@ -61,7 +61,7 @@
                     <!-- Edge lines with clickable areas -->
                     <g v-for="(edge, ei) in svgEdges" :key="'e'+ei" class="edge-group" @click.stop="onEdgeClick(edge, ei)">
                       <line :x1="edge.x1" :y1="edge.y1" :x2="edge.x2" :y2="edge.y2"
-                        :stroke="edge.color || '#e74c3c'" stroke-width="3" 
+                        :stroke="edge.color || '#e74c3c'" stroke-width="3"
                         :marker-end="'url(#arrowhead' + (edge.colorSuffix || '') + ')'"
                         class="edge-line" />
                       <!-- Edge label -->
