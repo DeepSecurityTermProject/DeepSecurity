@@ -1,0 +1,170 @@
+# -*- mode: ruby -*-
+# vi: set ft=ruby :
+
+# ============================================================
+# DeepSecurity 企业内网靶场 — Vagrant 一键部署
+# 对应文档: docs/网络环境搭建指南.md
+#
+# 使用方法:
+#   cd infra/lab
+#   vagrant up              # 启动全部 6 台 VM
+#   vagrant status          # 查看状态
+#   vagrant halt            # 关闭全部
+#   vagrant destroy -f      # 删除全部
+#
+# 最低宿主机要求: 16 GB RAM, 100 GB 空闲磁盘
+# ============================================================
+
+Vagrant.configure("2") do |config|
+
+  # ==================== 通用配置 ====================
+  # 禁用默认的 synced_folder，加快启动
+  config.vm.synced_folder ".", "/vagrant", disabled: true
+
+  # 将 scripts 目录同步到所有 VM（只读）
+  # 注意：Windows 主机需确保 PowerShell 执行策略允许脚本运行
+
+  # ==================== 1. attacker — 攻击机 ====================
+  config.vm.define "attacker" do |vm|
+    vm.vm.box = "kalilinux/rolling"
+    vm.vm.hostname = "attacker"
+    vm.vm.network "private_network", type: "dhcp", auto_config: true
+
+    vm.vm.provider "virtualbox" do |vb|
+      vb.name = "ds-lab-attacker"
+      vb.memory = 4096
+      vb.cpus = 2
+      vb.gui = false
+    end
+
+    vm.vm.provision "shell", inline: <<-SHELL
+      echo "[+] attacker: Kali Linux ready."
+      echo "[+] 预装工具: nmap, Metasploit, Hydra, impacket, crackmapexec, sqlmap"
+      sudo apt-get update -qq
+      sudo apt-get install -y -qq nmap hydra impacket-scripts crackmapexec sqlmap 2>/dev/null || true
+    SHELL
+  end
+
+  # ==================== 2. web-dmz — DMZ Web/API 服务器 ====================
+  config.vm.define "web-dmz" do |vm|
+    vm.vm.box = "ubuntu/jammy64"       # Ubuntu 22.04 LTS
+    vm.vm.hostname = "web-dmz"
+
+    # DMZ 网络 (vboxnet1)
+    vm.vm.network "private_network", ip: "192.168.100.10",
+      virtualbox__intnet: "ds-dmz"
+    # Internal 网络 — 仅用于访问 db-internal:3306 和向 soc-node 发日志（iptables 严格限制）
+    vm.vm.network "private_network", ip: "192.168.200.40",
+      virtualbox__intnet: "ds-internal"
+
+    vm.vm.provider "virtualbox" do |vb|
+      vb.name = "ds-lab-web-dmz"
+      vb.memory = 2048
+      vb.cpus = 2
+      vb.gui = false
+    end
+
+    # 同步 provisioning 脚本
+    vm.vm.synced_folder "scripts/", "/vagrant/scripts", type: "virtualbox"
+
+    vm.vm.provision "shell", path: "scripts/setup-web-dmz.sh"
+  end
+
+  # ==================== 3. db-internal — 内网数据库服务器 ====================
+  config.vm.define "db-internal" do |vm|
+    vm.vm.box = "ubuntu/jammy64"
+    vm.vm.hostname = "db-internal"
+
+    # Internal 网络 (vboxnet2)
+    vm.vm.network "private_network", ip: "192.168.200.20",
+      virtualbox__intnet: "ds-internal"
+
+    vm.vm.provider "virtualbox" do |vb|
+      vb.name = "ds-lab-db-internal"
+      vb.memory = 2048
+      vb.cpus = 2
+      vb.gui = false
+    end
+
+    vm.vm.synced_folder "scripts/", "/vagrant/scripts", type: "virtualbox"
+
+    vm.vm.provision "shell", path: "scripts/setup-db-internal.sh"
+  end
+
+  # ==================== 4. dc-ad — 域控制器 ====================
+  config.vm.define "dc-ad" do |vm|
+    vm.vm.box = "gusztavvargadr/windows-server-2022-standard"
+    vm.vm.hostname = "dc-ad"
+
+    # Internal 网络 (vboxnet2)
+    vm.vm.network "private_network", ip: "192.168.200.10",
+      virtualbox__intnet: "ds-internal"
+
+    vm.vm.provider "virtualbox" do |vb|
+      vb.name = "ds-lab-dc-ad"
+      vb.memory = 4096
+      vb.cpus = 2
+      vb.gui = false
+    end
+
+    vm.vm.synced_folder "scripts/", "C:/vagrant/scripts", type: "virtualbox"
+
+    vm.vm.provision "shell", inline: <<-SHELL
+      echo [+] dc-ad: Windows Server 2022 ready.
+      echo [+] Running setup-dc.ps1 (AD DS promotion may take 5-10 minutes)...
+      powershell -ExecutionPolicy Bypass -Command "& C:\\vagrant\\scripts\\setup-dc.ps1; exit 0"
+      echo [+] setup-dc.ps1 completed. A reboot is required for AD DS to function.
+    SHELL
+  end
+
+  # ==================== 5. win-workspace — 开发者工作站 ====================
+  config.vm.define "win-workspace" do |vm|
+    vm.vm.box = "gusztavvargadr/windows-10"
+    vm.vm.hostname = "win-workspace"
+
+    # Internal 网络 (vboxnet2)
+    vm.vm.network "private_network", ip: "192.168.200.30",
+      virtualbox__intnet: "ds-internal"
+
+    vm.vm.provider "virtualbox" do |vb|
+      vb.name = "ds-lab-win-workspace"
+      vb.memory = 4096
+      vb.cpus = 2
+      vb.gui = false
+    end
+
+    vm.vm.synced_folder "scripts/", "C:/vagrant/scripts", type: "virtualbox"
+
+    vm.vm.provision "shell", inline: <<-SHELL
+      echo [+] win-workspace: Windows 10 ready.
+      echo [+] Running setup-workspace.ps1...
+      powershell -ExecutionPolicy Bypass -Command "& C:\\vagrant\\scripts\\setup-workspace.ps1; exit 0"
+      echo [+] setup-workspace.ps1 completed.
+    SHELL
+  end
+
+  # ==================== 6. soc-node — 安全监测/SOC 节点 ====================
+  config.vm.define "soc-node" do |vm|
+    vm.vm.box = "ubuntu/jammy64"
+    vm.vm.hostname = "soc-node"
+
+    # Management 网络 (vboxnet3)
+    vm.vm.network "private_network", ip: "192.168.10.10",
+      virtualbox__intnet: "ds-management"
+    # Internal 网络 (vboxnet2) — 第二张网卡，用于巡检
+    vm.vm.network "private_network", ip: "192.168.200.50",
+      virtualbox__intnet: "ds-internal"
+
+    vm.vm.provider "virtualbox" do |vb|
+      vb.name = "ds-lab-soc-node"
+      vb.memory = 8192
+      vb.cpus = 4
+      vb.gui = false
+    end
+
+    vm.vm.synced_folder "scripts/", "/vagrant/scripts", type: "virtualbox"
+
+    vm.vm.provision "shell", path: "scripts/setup-soc.sh"
+  end
+
+end
