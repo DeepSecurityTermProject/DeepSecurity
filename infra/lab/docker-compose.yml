@@ -1,0 +1,202 @@
+# ============================================================
+# DeepSecurity 企业内网靶场 — Docker Compose 快速演示
+# 对应文档: docs/网络环境搭建指南.md
+#
+# 使用方法:
+#   cd infra/lab
+#   docker compose up -d
+#   docker compose ps
+#   docker compose down
+#
+# 限制: 无法完整模拟 Windows 域控、Sysmon 等功能。
+#       仅用于快速验证网络拓扑和日志采集管道。
+# ============================================================
+
+# ==================== 自定义网络（对应 VM 方案的三网段） ====================
+networks:
+  ds-dmz:
+    name: ds-dmz
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 192.168.100.0/24
+  ds-internal:
+    name: ds-internal
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 192.168.200.0/24
+  ds-management:
+    name: ds-management
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 192.168.10.0/24
+
+# ==================== 服务定义 ====================
+services:
+
+  # --- attacker: Kali 攻击机 ---
+  attacker:
+    image: kalilinux/kali-rolling:latest
+    container_name: ds-attacker
+    hostname: attacker
+    networks:
+      - ds-dmz
+    command: ["sleep", "infinity"]
+    restart: unless-stopped
+    environment:
+      - DEBIAN_FRONTEND=noninteractive
+    # Kali 可访问 DMZ 网络，模拟外部攻击者
+    cap_add:
+      - NET_RAW
+      - NET_ADMIN
+
+  # --- web-dmz: DMZ Web/API 服务器 ---
+  web-dmz:
+    image: ubuntu:jammy
+    container_name: ds-web-dmz
+    hostname: web-dmz
+    networks:
+      ds-dmz:
+        ipv4_address: 192.168.100.10
+      ds-internal: {}        # 仅可访问 db-internal（通过 iptables 限制）
+    command: ["sleep", "infinity"]
+    restart: unless-stopped
+    environment:
+      - DEBIAN_FRONTEND=noninteractive
+    cap_add:
+      - NET_ADMIN
+    # 注意: Docker 容器内 iptables 规则需在启动后手动应用
+    # 此处通过 docker exec 执行 setup 脚本
+
+  # --- db-internal: 内网 MySQL 数据库 ---
+  db-internal:
+    image: mysql:8.0
+    container_name: ds-db-internal
+    hostname: db-internal
+    networks:
+      ds-internal:
+        ipv4_address: 192.168.200.20
+    environment:
+      MYSQL_ROOT_PASSWORD: "<DB_ROOT_PASSWORD>"
+      MYSQL_DATABASE: SecurityTraceDB
+      MYSQL_USER: "<DB_USERNAME>"
+      MYSQL_PASSWORD: "<DB_PASSWORD>"
+    restart: unless-stopped
+    volumes:
+      - db-data:/var/lib/mysql
+      - ./mysql-conf.d:/etc/mysql/conf.d:ro
+
+  # --- dc-ad: 域控模拟（Samba AD DC） ---
+  # 注意: 这是 Linux Samba 实现的 AD 模拟，非完整 Windows AD
+  dc-ad:
+    image: ubuntu:jammy
+    container_name: ds-dc-ad
+    hostname: dc-ad
+    networks:
+      ds-internal:
+        ipv4_address: 192.168.200.10
+    command: ["sleep", "infinity"]
+    restart: unless-stopped
+    environment:
+      - DEBIAN_FRONTEND=noninteractive
+    # 实际使用时：容器启动后手动安装 Samba AD DC
+    # 或替换为 Windows Server Core 容器镜像（需 Windows 宿主）
+
+  # --- win-workspace: 终端模拟 ---
+  win-workspace:
+    image: ubuntu:jammy
+    container_name: ds-win-workspace
+    hostname: win-workspace
+    networks:
+      ds-internal:
+        ipv4_address: 192.168.200.30
+    command: ["sleep", "infinity"]
+    restart: unless-stopped
+    environment:
+      - DEBIAN_FRONTEND=noninteractive
+
+  # --- soc-node: SOC / 日志中心 ---
+  soc-node:
+    image: ubuntu:jammy
+    container_name: ds-soc-node
+    hostname: soc-node
+    networks:
+      ds-management:
+        ipv4_address: 192.168.10.10
+      ds-internal:
+        ipv4_address: 192.168.200.50
+    command: ["sleep", "infinity"]
+    restart: unless-stopped
+    environment:
+      - DEBIAN_FRONTEND=noninteractive
+    ports:
+      - "5000:5000"     # DeepSecurity Flask API
+    cap_add:
+      - NET_ADMIN
+
+  # --- Elasticsearch (独立服务) ---
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.11.0
+    container_name: ds-elasticsearch
+    hostname: elasticsearch
+    networks:
+      ds-management:
+        ipv4_address: 192.168.10.20
+    environment:
+      - discovery.type=single-node
+      - xpack.security.enabled=false
+      - "ES_JAVA_OPTS=-Xms512m -Xmx512m"
+    ports:
+      - "9200:9200"     # Elasticsearch API
+    healthcheck:
+      test: ["CMD-SHELL", "curl -s http://localhost:9200/_cluster/health | grep -q 'green\|yellow'"]
+      interval: 10s
+      timeout: 10s
+      retries: 10
+      start_period: 40s
+    restart: unless-stopped
+    volumes:
+      - es-data:/usr/share/elasticsearch/data
+
+  # --- Logstash (日志聚合) ---
+  logstash:
+    image: docker.elastic.co/logstash/logstash:8.11.0
+    container_name: ds-logstash
+    hostname: logstash
+    networks:
+      ds-management:
+        ipv4_address: 192.168.10.30
+    depends_on:
+      elasticsearch:
+        condition: service_healthy
+    ports:
+      - "5044:5044"     # Logstash Beats input
+      - "514:514/udp"   # Syslog input
+    volumes:
+      - ./logstash-conf.d:/usr/share/logstash/pipeline:ro
+    restart: unless-stopped
+
+  # --- Neo4j (攻击图谱) ---
+  neo4j:
+    image: neo4j:5
+    container_name: ds-neo4j
+    hostname: neo4j
+    networks:
+      ds-management:
+        ipv4_address: 192.168.10.40
+    environment:
+      NEO4J_AUTH: "neo4j/<NEO4J_PASSWORD>"
+    ports:
+      - "7687:7687"     # Neo4j Bolt
+      - "7474:7474"     # Neo4j Browser
+    restart: unless-stopped
+    volumes:
+      - neo4j-data:/data
+
+# ==================== 持久化卷 ====================
+volumes:
+  db-data:
+  es-data:
+  neo4j-data:
