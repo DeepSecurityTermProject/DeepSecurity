@@ -260,14 +260,7 @@ def api_rag_search():
 @bp.route("/api/knowledge", methods=["GET"])
 def api_knowledge():
     """获取知识库概览"""
-    return jsonify({
-        "ok": True,
-        "data": {
-            "documents_count": len(rag_kb.documents),
-            "vocabulary_size": len(rag_kb.vocabulary),
-            "categories": list(set(d.get("category", "") for d in rag_kb.documents))
-        }
-    })
+    return jsonify({"ok": True, "data": rag_kb.get_runtime_info()})
 
 
 @bp.route("/api/evidence/cases", methods=["GET"])

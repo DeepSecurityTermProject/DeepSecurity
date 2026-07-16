@@ -5,6 +5,7 @@ When pyodbc/SQL Server is unavailable, auto-degrades to in-memory DataBridge mod
 import logging
 import re
 import json
+import time
 from datetime import datetime
 
 logger = logging.getLogger(__name__)
@@ -19,13 +20,34 @@ except ImportError:
 
 from utils.data_bridge import get_bridge
 
+_SQL_UNAVAILABLE_UNTIL = 0.0
+_SQL_RETRY_COOLDOWN_SECONDS = 3.0
+
+
+def _mark_sql_unavailable():
+    global _SQL_UNAVAILABLE_UNTIL
+    _SQL_UNAVAILABLE_UNTIL = time.monotonic() + _SQL_RETRY_COOLDOWN_SECONDS
+
+
+def _clear_sql_unavailable():
+    global _SQL_UNAVAILABLE_UNTIL
+    _SQL_UNAVAILABLE_UNTIL = 0.0
+
 
 def _get_conn(conn_str: str | None = None):
     """Get pyodbc connection, or raise if unavailable"""
     if not _HAS_PYODBC:
         raise RuntimeError("pyodbc not installed")
+    if time.monotonic() < _SQL_UNAVAILABLE_UNTIL:
+        raise RuntimeError("sql server temporarily unavailable")
     cstr = conn_str or Config.SQL_CONN_STR
-    return pyodbc.connect(cstr, timeout=5)
+    try:
+        conn = pyodbc.connect(cstr, timeout=1)
+        _clear_sql_unavailable()
+        return conn
+    except Exception:
+        _mark_sql_unavailable()
+        raise
 
 
 def _parse_table(sql: str) -> str:
