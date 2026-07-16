@@ -122,7 +122,6 @@ class ATTACKMapper:
         dst_port = event_data.get('dst_port')
         if dst_port in [7687, 1433, 5000]:  # Neo4j, SQL, Flask
             return []
-        # ---------------------------
 
         if not self.rules:
             logging.warning("规则库为空，无法执行分析")
@@ -195,12 +194,13 @@ class ATTACKMapper:
 
                 mapping = rule.get('attack_mapping', {})
 
-                # 生成导致该告警的实体节点的唯一ID (用于构建 Process -> TRIGGERED -> AttackEvent 关系)
-                related_entity_id = self._generate_event_id(event_data)
+                # [增强] 生成与该事件相关的多个实体ID，用于建立 TRIGGERED 关系
+                related_ids = self._generate_all_entity_ids(event_data)
 
                 attack_result = {
                     "attack_id": str(uuid.uuid4()),  # 攻击事件唯一ID (Neo4j: AttackEvent节点ID)
                     "rule_id": rule.get("rule_id"),  # 补充：便于追溯是哪条规则触发的
+                    "data_source": data_source,      # [新增] 记录数据源用于证据追溯
                     "tactic": {
                         "id": mapping.get('tactic_id'),
                         "name": mapping.get('tactic_name')
@@ -209,8 +209,8 @@ class ATTACKMapper:
                         "id": mapping.get('technique_id'),
                         "name": mapping.get('technique_name')
                     },
-                    # 这里存放的是“源实体”的ID列表，用于在图数据库中建立边
-                    "related_events": [related_entity_id],
+                    # [增强] 存放所有相关的实体ID列表（多个实体类型）
+                    "related_events": related_ids,
                     "confidence": "High",  # 默认高置信度，可根据规则复杂程度调整
                     "timestamp_start": event_data.get("timestamp"),
                     "timestamp_end": event_data.get("timestamp"),  # 如果是聚合事件，这里可以延后
@@ -236,50 +236,90 @@ class ATTACKMapper:
 
         return event.get('src_ip')
 
-    def _generate_event_id(self, event):
+    # =========================================================================
+    # [增强] 生成该事件所有相关的实体节点 ID 列表
+    # =========================================================================
+    def _generate_all_entity_ids(self, event):
         """
-        生成与图数据库实体节点一致的 ID，用于建立 TRIGGERED 关系。
-        规则参考《数据库设计字典》第一层：实体层。
+        生成该事件所有相关的实体节点 ID，确保 AttackEvent 能回连到
+        Process、User、IP、Domain、File、Registry、Session 等多种实体类型。
+        返回一个 ID 列表。
         """
+        ids = []
+
         data_source = event.get('data_source')
         entities = event.get('entities', {})
         host_ip = event.get('host_ip')
 
-        # 1. 进程相关行为 (Process Node ID: HostIP_PID_CreateTime)
-        # 注意：如果是 process_create，timestamp 就是 CreateTime
-        # 如果是其他行为（如 file_create），理想情况是知道发起进程的启动时间，
-        # 但如果不知道，这里只能尽可能返回能标识该进程的ID。
-        # 简化策略：如果是 process_create，使用当前时间戳作为后缀；
-        # 如果是子行为，通常日志里不带父进程启动时间，可能需要基于 PID 模糊匹配（此处暂略，假设已有逻辑或仅返回 Host_PID）
-        if data_source == 'host_behavior' or 'pid' in entities:
-            pid = entities.get('pid')
-            # 严格对应接口文档 Process 节点 ID
-            # 注意：实际生产中需要缓存 PID->StartTime 的映射，这里做简化处理
+        # 1. 进程相关 ID (Process Node)
+        pid = entities.get('pid')
+        if pid and host_ip:
+            # 尝试生成带时间戳的进程ID
             timestamp_suffix = event.get('timestamp') if event.get('event_type') == 'process_create' else 'unknown'
-            if host_ip and pid:
-                return f"{host_ip}_{pid}_{timestamp_suffix}"
+            proc_id = f"{host_ip}_{pid}_{timestamp_suffix}"
+            ids.append(proc_id)
 
-        # 2. 网络流量相关 (Domain Node 或 IP Node)
-        if data_source == 'network_traffic':
-            # 如果是 DNS 隧道，关联到 Domain 节点
-            if entities.get('domain'):
-                return entities.get('domain')  # ID: DomainName
+            # 父进程 ID
+            parent_pid = entities.get('parent_pid')
+            if parent_pid:
+                parent_id = f"{host_ip}_{parent_pid}_unknown"
+                ids.append(parent_id)
 
-            # 否则关联到源 IP (作为攻击发起点或受害点)
-            if event.get('src_ip'):
-                return event.get('src_ip')  # ID: IP_Address
+        # 2. 用户相关 ID (User Node)
+        username = entities.get('user') or entities.get('username')
+        if username and host_ip:
+            user_id = f"{host_ip}_{username}"
+            ids.append(user_id)
 
-        # 3. 主机日志相关 (User Node 或 IP Node)
-        if data_source == 'host_log':
-            # 登录相关，关联到 User 节点 (ID: HostIP_Username)
-            if 'user' in entities and host_ip:
-                return f"{host_ip}_{entities['user']}"
+        # 3. IP 地址相关 (IP Node)
+        src_ip = event.get('src_ip') or entities.get('src_ip')
+        if src_ip:
+            ids.append(src_ip)
 
-        # 4. 注册表相关 (Registry Node)
-        # 接口文档定义 ID 为 Registry_Key_Path
-        if event.get('event_type') == 'registry_set_value':
-            if entities.get('registry_key'):
-                return entities.get('registry_key')
+        dst_ip = event.get('dst_ip') or entities.get('dst_ip')
+        if dst_ip:
+            ids.append(dst_ip)
+
+        # 4. Domain (DNS查询)
+        domain = entities.get('domain')
+        if domain:
+            ids.append(domain)
+
+        # 5. 文件路径 (File Node)
+        file_path = entities.get('file_path')
+        if file_path and host_ip:
+            file_id = f"{host_ip}_{file_path}"
+            ids.append(file_id)
+
+        # 6. 进程名作为 fallback (File Node 或 Process)
+        process_name = entities.get('process_name')
+        if process_name and host_ip and not pid:
+            # 如果没有 PID 但知道进程名，用名称作为辅助标识
+            ids.append(f"{host_ip}_proc_{process_name}")
+
+        # 7. 注册表 (Registry Node)
+        registry_key = entities.get('registry_key')
+        if registry_key:
+            ids.append(registry_key)
+
+        # 8. 会话 ID (Session Node)
+        session_id = entities.get('session_id')
+        if session_id and host_ip:
+            session_node_id = f"{host_ip}_session_{session_id}"
+            ids.append(session_node_id)
+
+        # 9. 去重并返回
+        return list(set(ids))
+
+    def _generate_event_id(self, event):
+        """
+        [向后兼容] 生成与图数据库实体节点一致的 ID，用于建立 TRIGGERED 关系。
+        现在返回唯一主实体 ID（兼容旧代码）。
+        """
+        # 直接取第一个实体 ID
+        all_ids = self._generate_all_entity_ids(event)
+        if all_ids:
+            return all_ids[0]
 
         # 5. 兜底：防止返回 None 导致报错
         return f"Unlinked_Event_{event.get('timestamp')}"
